@@ -1,13 +1,30 @@
 {
   "": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the windows",
+  "windows": ["main", "yt-player"],
+  "remote": {
+    "urls": [
+      "https://music.youtube.com/*",
+      "https://www.youtube.com/*",
+      "https://youtube.com/*",
+      "https://soundcloud.com/*",
+      "https://*.soundcloud.com/*"
+    ]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-close",
     "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-center",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:webview:allow-set-webview-size",
+    "core:webview:allow-set-webview-position",
+    "core:webview:allow-reparent",
+    "core:webview:allow-webview-show",
+    "core:webview:allow-webview-hide",
     "opener:default"
   ]
 }

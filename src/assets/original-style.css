@@ -27,11 +27,11 @@
       flex-direction: column;
       padding: 10px;
       margin: 0;
-      width: 100vw;
-      height: 100vh;
+      width: 100%;
+      height: 100%;
       border: 1px solid rgba(255, 255, 255, 0.1);
-      transition: all 0.3s ease;
-      clip-path: inset(1px round 12px);
+      transition: background 0.3s ease;
+      clip-path: inset(0px round 12px);
     }
 
     body.expanded {
@@ -641,7 +641,7 @@
       margin-top: 10px;
       border: none;
       border-radius: 8px;
-      background: #111;
+      background: transparent;
       -webkit-app-region: no-drag;
       height: 0;
       flex: 0;

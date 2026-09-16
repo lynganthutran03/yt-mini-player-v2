@@ -1,4 +1,4 @@
-﻿@import "./assets/original-style.css";
+@import "./assets/original-style.css";
 
 /* Reset root and ensure drag-header works naturally */
 #root {
@@ -8,11 +8,175 @@
   flex-direction: column;
 }
 
-[data-tauri-drag-region] {
-  -webkit-app-region: drag;
+.drag-header {
   cursor: grab;
+  -webkit-app-region: no-drag;
 }
 
-button, input, select, .no-drag {
+.top-row {
   -webkit-app-region: no-drag;
+}
+
+#close-app,
+#toggle-web {
+  position: relative;
+  z-index: 10003;
+}
+
+#close-app {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+body.compact #close-app {
+  top: 0;
+  right: 0;
+}
+
+body.settings-open #close-app {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.platform-selector-wrapper .platform-brand {
+  color: #ff0000 !important;
+}
+
+.platform-selector-wrapper .platform-brand-music {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border: 2px solid #ff0000;
+  border-radius: 50%;
+}
+
+.youtube-music-play {
+  width: 0;
+  height: 0;
+  margin-left: 1px;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid #ff0000;
+}
+
+.platform-selector-wrapper .fa-soundcloud {
+  color: #ff5500 !important;
+}
+
+#loop.repeat-one::after {
+  content: none;
+}
+
+.repeat-one-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: grid;
+  width: 10px;
+  height: 10px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Ensure resize grip on the bottom-right corner when expanded or normal */
+.resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  z-index: 10001;
+  -webkit-app-region: no-drag;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.4) 1px, transparent 1px);
+  background-size: 4px 4px;
+  background-position: bottom right;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  pointer-events: auto;
+}
+
+.resize-handle:hover {
+  opacity: 1;
+}
+
+/* 4 Viền kéo resize (Edge resize zones) */
+.resize-edge {
+  position: fixed;
+  z-index: 10000;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.resize-top {
+  top: 0;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-bottom {
+  bottom: 0;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-left {
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-right {
+  right: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+/* 4 Góc kéo resize (Corner resize zones) */
+.resize-corner {
+  position: fixed;
+  width: 12px;
+  height: 12px;
+  z-index: 10002;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.resize-top-left {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.resize-top-right {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.resize-bottom-left {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.resize-bottom-right {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
 }
