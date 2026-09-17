@@ -25,18 +25,50 @@
 
 #close-app {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: 10px;
+  right: 12px;
 }
 
 body.compact #close-app {
-  top: 0;
-  right: 0;
+  top: 7px;
+  right: 10px;
 }
 
 body.settings-open #close-app {
   z-index: 1;
   pointer-events: none;
+}
+
+body.settings-open #toggle-web {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.settings-open .drag-header,
+body.settings-open .resize-edge,
+body.settings-open .resize-corner {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.player-fullscreen {
+  padding: 0;
+  border: 0;
+  clip-path: none;
+}
+
+body.player-fullscreen .drag-header {
+  display: none;
+}
+
+body.player-fullscreen #yt-view {
+  margin-top: 0;
+  border-radius: 0;
+}
+
+body.player-fullscreen .resize-edge,
+body.player-fullscreen .resize-corner {
+  display: none;
 }
 
 .platform-selector-wrapper .platform-brand {

@@ -59,6 +59,20 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
             });
         } catch(e) {}
 
+        // Keep the native mini-player chrome out of the way while a site uses
+        // the browser fullscreen API (notably YouTube's fullscreen button).
+        const emitFullscreenState = () => {
+            try {
+                if (window.__TAURI__ && window.__TAURI__.event) {
+                    window.__TAURI__.event.emit('player-fullscreen-state', {
+                        isFullscreen: Boolean(document.fullscreenElement)
+                    });
+                }
+            } catch(e) {}
+        };
+        document.addEventListener('fullscreenchange', emitFullscreenState);
+        window.setTimeout(emitFullscreenState, 0);
+
         // Periodic scraper for YouTube Music
         setInterval(() => {
             try {
@@ -594,6 +608,9 @@ fn toggle_expand_view(
         main_win
             .set_size(target_size)
             .map_err(|e| format!("Failed to expand window: {e}"))?;
+        main_win
+            .center()
+            .map_err(|e| format!("Failed to center expanded window: {e}"))?;
 
         let webview = app
             .get_webview("yt-player")
@@ -699,18 +716,60 @@ fn resize_yt_view(
 }
 
 #[tauri::command]
-fn resize_modal(window: tauri::Window, is_open: bool, height: Option<u32>) -> Result<(), String> {
+fn resize_modal(
+    window: tauri::Window,
+    is_open: bool,
+    height: Option<u32>,
+    restore_state: State<'_, WindowRestoreState>,
+) -> Result<(), String> {
     let main_win = window;
 
     if is_open {
         let h = height.unwrap_or(380);
+        let geometry = WindowGeometry {
+            position: main_win
+                .outer_position()
+                .map_err(|e| format!("Failed to read window position: {e}"))?,
+            size: main_win
+                .outer_size()
+                .map_err(|e| format!("Failed to read window size: {e}"))?,
+        };
+        let mut saved = restore_state
+            .0
+            .lock()
+            .map_err(|_| "Window restore state lock poisoned".to_string())?;
+        if saved.is_none() {
+            *saved = Some(geometry);
+        }
+        drop(saved);
         main_win
-            .set_size(PhysicalSize::new(420, h))
-            .map_err(|e| format!("{:?}", e))?;
+            .set_size(tauri::LogicalSize::new(420.0, h as f64))
+            .map_err(|e| format!("Failed to resize settings window: {e}"))?;
+        main_win
+            .center()
+            .map_err(|e| format!("Failed to center settings window: {e}"))?;
     } else {
-        main_win
-            .set_size(PhysicalSize::new(420, 130))
-            .map_err(|e| format!("{:?}", e))?;
+        let saved_geometry = restore_state
+            .0
+            .lock()
+            .map_err(|_| "Window restore state lock poisoned".to_string())?
+            .clone();
+        if let Some(geometry) = saved_geometry {
+            main_win
+                .set_size(geometry.size)
+                .map_err(|e| format!("Failed to restore settings window size: {e}"))?;
+            main_win
+                .set_position(geometry.position)
+                .map_err(|e| format!("Failed to restore settings window position: {e}"))?;
+            *restore_state
+                .0
+                .lock()
+                .map_err(|_| "Window restore state lock poisoned".to_string())? = None;
+        } else {
+            main_win
+                .set_size(tauri::LogicalSize::new(420.0, 130.0))
+                .map_err(|e| format!("Failed to shrink settings window: {e}"))?;
+        }
     }
     Ok(())
 }

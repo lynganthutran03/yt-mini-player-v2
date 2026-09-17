@@ -18,6 +18,10 @@ interface YTMusicData {
   repeatDebug?: string;
 }
 
+interface PlayerFullscreenData {
+  isFullscreen: boolean;
+}
+
 export const App: React.FC = () => {
   // Trạng thái bài hát thực tế nhận từ Webview
   const [title, setTitle] = useState('Đang kết nối YouTube Music...');
@@ -34,6 +38,7 @@ export const App: React.FC = () => {
 
   // Trạng thái giao diện
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [accentColor, setAccentColor] = useState(localStorage.getItem('yt-mini-accent') || '#ff4444');
   const [vinylSpin, setVinylSpin] = useState(localStorage.getItem('yt-mini-vinyl') !== 'false');
@@ -48,7 +53,7 @@ export const App: React.FC = () => {
       console.warn('init_player_webview error:', err);
     });
 
-    const unlistenPromise = listen<YTMusicData>('yt-music-data', (event) => {
+    const unlistenDataPromise = listen<YTMusicData>('yt-music-data', (event) => {
       const data = event.payload;
       if (data.title) setTitle(data.title);
       if (data.artist) setArtist(data.artist);
@@ -69,9 +74,13 @@ export const App: React.FC = () => {
       if (typeof data.duration === 'number') setDuration(data.duration);
       if (typeof data.volume === 'number') setVolume(data.volume);
     });
+    const unlistenFullscreenPromise = listen<PlayerFullscreenData>('player-fullscreen-state', (event) => {
+      setIsPlayerFullscreen(Boolean(event.payload.isFullscreen));
+    });
 
     return () => {
-      unlistenPromise.then((unlisten) => unlisten());
+      unlistenDataPromise.then((unlisten) => unlisten());
+      unlistenFullscreenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -86,11 +95,12 @@ export const App: React.FC = () => {
     body.classList.remove(...themes);
     body.classList.add(themes[themeIdx]);
 
-    if (vinylSpin) body.classList.add('vinyl-mode');
-    if (isPlaying) body.classList.add('is-playing');
-    if (isExpanded) body.classList.add('expanded');
-    if (isSettingsOpen) body.classList.add('settings-open');
-  }, [isPlaying, vinylSpin, accentColor, isExpanded, isSettingsOpen, themeIdx]);
+    body.classList.toggle('vinyl-mode', vinylSpin);
+    body.classList.toggle('is-playing', isPlaying);
+    body.classList.toggle('expanded', isExpanded);
+    body.classList.toggle('settings-open', isSettingsOpen);
+    body.classList.toggle('player-fullscreen', isPlayerFullscreen);
+  }, [isPlaying, vinylSpin, accentColor, isExpanded, isSettingsOpen, isPlayerFullscreen, themeIdx]);
 
   // Đóng ứng dụng
   const handleClose = async () => {
@@ -339,17 +349,17 @@ export const App: React.FC = () => {
 
   // Đổi trạng thái Settings Modal
   const handleToggleSettings = async (open: boolean) => {
-    setIsSettingsOpen(open);
-    try {
-      const win = getCurrentWindow();
-      if (open) {
-        await win.setSize(new LogicalSize(420, 380));
-      } else {
-        await win.setSize(new LogicalSize(420, 130));
+    if (open && isExpanded) {
+      try {
+        await invoke('toggle_expand_view', { isExpanded: false });
+        setIsExpanded(false);
+      } catch (err) {
+        console.warn('Could not close expanded player before settings:', err);
+        return;
       }
-    } catch (e) {
-      console.warn('Frontend modal setSize error:', e);
     }
+
+    setIsSettingsOpen(open);
     try {
       await invoke('resize_modal', { isOpen: open, height: open ? 380 : 130 });
     } catch (err) {
@@ -558,7 +568,7 @@ export const App: React.FC = () => {
             >
               <i className="fa-solid fa-ellipsis-vertical"></i>
             </button>
-            <button id="toggle-web" title={isExpanded ? 'Thu nhỏ giao diện' : 'Mở rộng giao diện'}>
+            <button id="toggle-web" title={isExpanded ? 'Thu nhỏ giao diện' : 'Mở rộng giao diện'} disabled={isSettingsOpen}>
               <i className={isExpanded ? 'fa-solid fa-xmark' : 'fa-solid fa-expand'}></i>
             </button>
           </div>
