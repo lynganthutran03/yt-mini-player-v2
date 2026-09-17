@@ -61,21 +61,30 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
 
         // Keep the native mini-player chrome out of the way while a site uses
         // the browser fullscreen API (notably YouTube's fullscreen button).
-        const emitFullscreenState = () => {
+        const emitFullscreenState = (force = false) => {
             try {
+                const isFullscreen = Boolean(
+                    document.fullscreenElement ||
+                    document.webkitFullscreenElement ||
+                    document.querySelector('.ytp-fullscreen')
+                );
+                if (!force && window.__miniPlayerFullscreenState === isFullscreen) return;
+                window.__miniPlayerFullscreenState = isFullscreen;
                 if (window.__TAURI__ && window.__TAURI__.event) {
                     window.__TAURI__.event.emit('player-fullscreen-state', {
-                        isFullscreen: Boolean(document.fullscreenElement)
+                        isFullscreen
                     });
                 }
             } catch(e) {}
         };
         document.addEventListener('fullscreenchange', emitFullscreenState);
-        window.setTimeout(emitFullscreenState, 0);
+        document.addEventListener('webkitfullscreenchange', emitFullscreenState);
+        window.setTimeout(() => emitFullscreenState(true), 0);
 
         // Periodic scraper for YouTube Music
         setInterval(() => {
             try {
+                emitFullscreenState();
                 const playerBar = document.querySelector('ytmusic-player-bar');
                 if (!playerBar) {
                     // Standard YouTube watch page has a different DOM from
