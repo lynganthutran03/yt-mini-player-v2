@@ -1,10 +1,21 @@
-use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewBuilder, WebviewUrl,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewBuilder, WebviewUrl,
+};
 
 static PLAYER_WEBVIEW_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone)]
+struct WindowGeometry {
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+}
+
+#[derive(Default)]
+struct WindowRestoreState(Mutex<Option<WindowGeometry>>);
 
 #[tauri::command]
 fn close_app(app: AppHandle) {
@@ -39,7 +50,6 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
         return Ok(());
     }
 
-
     let init_script = r#"
         // Anti-bot & Safe login evasion
         try {
@@ -66,6 +76,15 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                         const videoId = new URLSearchParams(location.search).get('v') || location.pathname.match(/^\/shorts\/([^/?]+)/)?.[1] || '';
                         const generatedThumb = videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : '';
                         const thumb = playerThumb || generatedThumb || imageMeta?.content || video?.getAttribute('poster') || '';
+                        const youtubePlayer = document.getElementById('movie_player');
+                        const shuffleButton = document.querySelector('button.ytp-shuffle-button');
+                        const repeatButton = document.querySelector('button.ytp-repeat-button');
+                        const isShuffleActive = typeof youtubePlayer?.getShuffle === 'function'
+                            ? Boolean(youtubePlayer.getShuffle())
+                            : shuffleButton?.getAttribute('aria-pressed') === 'true' || shuffleButton?.classList.contains('ytp-button-active');
+                        const isLoopActive = typeof youtubePlayer?.getLoop === 'function'
+                            ? Boolean(youtubePlayer.getLoop())
+                            : repeatButton?.getAttribute('aria-pressed') === 'true' || repeatButton?.classList.contains('ytp-button-active');
 
                         if (window.__TAURI__ && window.__TAURI__.event) {
                             window.__TAURI__.event.emit('yt-music-data', {
@@ -75,8 +94,8 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                                 thumb,
                                 isPlaying: Boolean(video && !video.paused),
                                 volume: video ? Math.round((video.muted ? 0 : video.volume) * 100) : 100,
-                                isShuffleActive: false,
-                                loopState: 'none',
+                                isShuffleActive,
+                                loopState: isLoopActive ? 'all' : 'none',
                                 currentTime: video?.currentTime || 0,
                                 duration: video?.duration || 0
                             });
@@ -304,22 +323,53 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
     // Embed YouTube Music directly as a child webview of the main window
     let webview = WebviewBuilder::new(
         "yt-player",
-        WebviewUrl::External("https://music.youtube.com".parse().map_err(|e| format!("{:?}", e))?),
+        WebviewUrl::External(
+            "https://music.youtube.com"
+                .parse()
+                .map_err(|e| format!("{:?}", e))?,
+        ),
     )
     .user_agent(user_agent)
     .initialization_script(init_script)
     .on_new_window(move |url, features| {
-        let label = format!("login-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        let label = format!(
+            "login-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
         let visited_google = Arc::new(AtomicBool::new(false));
         let popup_login_state = visited_google.clone();
+        let popup_app = app.clone();
         let popup = tauri::WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
             .window_features(features)
-            .title("Đăng nhập SoundCloud")
+            .title("SoundCloud login")
+            .user_agent(user_agent)
             .on_page_load(move |webview, payload| {
-                let host = payload.url().host_str().unwrap_or("");
+                if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    return;
+                }
+
+                let url = payload.url();
+                let host = url.host_str().unwrap_or("");
                 if host.ends_with("google.com") {
                     popup_login_state.store(true, Ordering::SeqCst);
-                } else if popup_login_state.load(Ordering::SeqCst) && host.ends_with("soundcloud.com") {
+                    return;
+                }
+
+                // Only the clean SoundCloud home URL counts as completion.
+                // Redirects used for verification and OAuth callbacks retain a
+                // path or query string and must stay open.
+                let is_completed_login = popup_login_state.load(Ordering::SeqCst)
+                    && matches!(host, "soundcloud.com" | "www.soundcloud.com")
+                    && url.path() == "/"
+                    && url.query().is_none();
+                if is_completed_login {
+                    popup_login_state.store(false, Ordering::SeqCst);
+                    if let Some(player) = popup_app.get_webview("yt-player") {
+                        let _ = player.eval("window.location.reload();");
+                    }
                     let _ = webview.close();
                 }
             })
@@ -332,7 +382,8 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
     });
 
     // Park child webview at 1x1 bottom corner initially (same trick as V1)
-    main_win.add_child(
+    main_win
+        .add_child(
             webview,
             PhysicalPosition::new(419, 129),
             PhysicalSize::new(1, 1),
@@ -365,7 +416,12 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
         "next" => {
             r#"
             (function() {
-                const btn = document.querySelector('.next-button') || document.querySelector('.skipControl__next');
+                const youtubePlayer = document.getElementById('movie_player');
+                if (youtubePlayer && typeof youtubePlayer.nextVideo === 'function') {
+                    youtubePlayer.nextVideo();
+                    return;
+                }
+                const btn = document.querySelector('.next-button') || document.querySelector('.skipControl__next') || document.querySelector('button.ytp-next-button');
                 if (btn) btn.click();
             })();
             "#
@@ -374,7 +430,12 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
         "prev" => {
             r#"
             (function() {
-                const btn = document.querySelector('.previous-button') || document.querySelector('.skipControl__previous');
+                const youtubePlayer = document.getElementById('movie_player');
+                if (youtubePlayer && typeof youtubePlayer.previousVideo === 'function') {
+                    youtubePlayer.previousVideo();
+                    return;
+                }
+                const btn = document.querySelector('.previous-button') || document.querySelector('.skipControl__previous') || document.querySelector('button.ytp-prev-button');
                 if (btn) btn.click();
             })();
             "#
@@ -383,7 +444,13 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
         "shuffle" => {
             r#"
             (function() {
-                const btn = document.querySelector('ytmusic-player-bar #shuffle') || document.querySelector('ytmusic-player-bar .shuffle') || document.querySelector('#shuffle') || document.querySelector('[data-action="shuffle"]') || document.querySelector('.shuffleControl');
+                const youtubePlayer = document.getElementById('movie_player');
+                if (youtubePlayer && typeof youtubePlayer.setShuffle === 'function') {
+                    const isActive = typeof youtubePlayer.getShuffle === 'function' && youtubePlayer.getShuffle();
+                    youtubePlayer.setShuffle(!isActive);
+                    return;
+                }
+                const btn = document.querySelector('ytmusic-player-bar #shuffle') || document.querySelector('ytmusic-player-bar .shuffle') || document.querySelector('#shuffle') || document.querySelector('[data-action="shuffle"]') || document.querySelector('.shuffleControl') || document.querySelector('button.ytp-shuffle-button');
                 if (btn) btn.click();
             })();
             "#
@@ -392,7 +459,13 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
         "loop" => {
             r#"
             (function() {
-                const btn = document.querySelector('ytmusic-player-bar #repeat') || document.querySelector('ytmusic-player-bar .repeat') || document.querySelector('#repeat') || document.querySelector('.repeatControl');
+                const youtubePlayer = document.getElementById('movie_player');
+                if (youtubePlayer && typeof youtubePlayer.setLoop === 'function') {
+                    const isActive = typeof youtubePlayer.getLoop === 'function' && youtubePlayer.getLoop();
+                    youtubePlayer.setLoop(!isActive);
+                    return;
+                }
+                const btn = document.querySelector('ytmusic-player-bar #repeat') || document.querySelector('ytmusic-player-bar .repeat') || document.querySelector('#repeat') || document.querySelector('.repeatControl') || document.querySelector('button.ytp-repeat-button');
                 if (btn) btn.click();
             })();
             "#
@@ -416,12 +489,30 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
                         slider.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         slider.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     }}
+                    // YouTube's watch-page player owns its own volume state.
+                    // Updating it through this API keeps the visible YouTube
+                    // slider and the media element in sync.
+                    const youtubePlayer = document.getElementById('movie_player');
+                    if (location.hostname.endsWith('youtube.com') &&
+                        !location.hostname.includes('music.youtube.com') &&
+                        youtubePlayer && typeof youtubePlayer.setVolume === 'function') {{
+                        if ({}) {{
+                            youtubePlayer.setVolume(0);
+                            youtubePlayer.mute();
+                        }}
+                        else {{
+                            youtubePlayer.unMute();
+                            youtubePlayer.setVolume({});
+                        }}
+                    }}
                 }})();
                 "#,
                 v,
                 if vol_int == 0 { "true" } else { "false" },
                 vol_int,
-                vol_int
+                vol_int,
+                if vol_int == 0 { "true" } else { "false" },
+                vol_int,
             )
         }
         "seek" => {
@@ -471,16 +562,38 @@ fn switch_platform(app: AppHandle, platform: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_expand_view(app: AppHandle, window: tauri::Window, is_expanded: bool) -> Result<(), String> {
+fn toggle_expand_view(
+    app: AppHandle,
+    window: tauri::Window,
+    is_expanded: bool,
+    restore_state: State<'_, WindowRestoreState>,
+) -> Result<(), String> {
     let main_win = window;
 
     let scale_factor = main_win.scale_factor().unwrap_or(1.0);
 
     if is_expanded {
+        let geometry = WindowGeometry {
+            position: main_win
+                .outer_position()
+                .map_err(|e| format!("Failed to read window position: {e}"))?,
+            size: main_win
+                .outer_size()
+                .map_err(|e| format!("Failed to read window size: {e}"))?,
+        };
+        let mut saved = restore_state
+            .0
+            .lock()
+            .map_err(|_| "Window restore state lock poisoned".to_string())?;
+        if saved.is_none() {
+            *saved = Some(geometry);
+        }
+        drop(saved);
         // Phóng to cửa sổ chính lên 950x700 Logical
         let target_size = tauri::LogicalSize::new(950.0, 700.0);
-        main_win.set_size(target_size).map_err(|e| format!("Failed to expand window: {e}"))?;
-        main_win.center().map_err(|e| format!("Failed to center expanded window: {e}"))?;
+        main_win
+            .set_size(target_size)
+            .map_err(|e| format!("Failed to expand window: {e}"))?;
 
         let webview = app
             .get_webview("yt-player")
@@ -497,14 +610,42 @@ fn toggle_expand_view(app: AppHandle, window: tauri::Window, is_expanded: bool) 
             (560.0 * scale_factor).round() as u32,
         );
 
-        webview.set_position(phys_pos).map_err(|e| format!("Failed to position player: {e}"))?;
-        webview.set_size(phys_size).map_err(|e| format!("Failed to size player: {e}"))?;
-        webview.show().map_err(|e| format!("Failed to show player: {e}"))?;
-        webview.set_focus().map_err(|e| format!("Failed to focus player: {e}"))?;
+        webview
+            .set_position(phys_pos)
+            .map_err(|e| format!("Failed to position player: {e}"))?;
+        webview
+            .set_size(phys_size)
+            .map_err(|e| format!("Failed to size player: {e}"))?;
+        webview
+            .show()
+            .map_err(|e| format!("Failed to show player: {e}"))?;
+        webview
+            .set_focus()
+            .map_err(|e| format!("Failed to focus player: {e}"))?;
     } else {
         // Thu nhỏ cửa sổ chính về 420x130 Logical
-        let target_size = tauri::LogicalSize::new(420.0, 130.0);
-        main_win.set_size(target_size).map_err(|e| format!("Failed to shrink window: {e}"))?;
+        let saved_geometry = restore_state
+            .0
+            .lock()
+            .map_err(|_| "Window restore state lock poisoned".to_string())?
+            .clone();
+
+        if let Some(geometry) = saved_geometry {
+            main_win
+                .set_size(geometry.size)
+                .map_err(|e| format!("Failed to restore window size: {e}"))?;
+            main_win
+                .set_position(geometry.position)
+                .map_err(|e| format!("Failed to restore window position: {e}"))?;
+            *restore_state
+                .0
+                .lock()
+                .map_err(|_| "Window restore state lock poisoned".to_string())? = None;
+        } else {
+            main_win
+                .set_size(tauri::LogicalSize::new(420.0, 130.0))
+                .map_err(|e| format!("Failed to shrink window: {e}"))?;
+        }
 
         let webview = app
             .get_webview("yt-player")
@@ -517,15 +658,26 @@ fn toggle_expand_view(app: AppHandle, window: tauri::Window, is_expanded: bool) 
         );
         let phys_size = PhysicalSize::new(1, 1);
 
-        webview.set_position(phys_pos).map_err(|e| format!("Failed to park player: {e}"))?;
-        webview.set_size(phys_size).map_err(|e| format!("Failed to resize parked player: {e}"))?;
+        webview
+            .set_position(phys_pos)
+            .map_err(|e| format!("Failed to park player: {e}"))?;
+        webview
+            .set_size(phys_size)
+            .map_err(|e| format!("Failed to resize parked player: {e}"))?;
     }
 
     Ok(())
 }
 
 #[tauri::command]
-fn resize_yt_view(app: AppHandle, window: tauri::Window, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+fn resize_yt_view(
+    app: AppHandle,
+    window: tauri::Window,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
     let main_win = window;
     let webview = app
         .get_webview("yt-player")
@@ -567,6 +719,7 @@ fn resize_modal(window: tauri::Window, is_open: bool, height: Option<u32>) -> Re
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(WindowRestoreState::default())
         .invoke_handler(tauri::generate_handler![
             close_app,
             init_player_webview,

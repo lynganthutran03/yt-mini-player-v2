@@ -40,6 +40,7 @@ export const App: React.FC = () => {
   const [themeIdx, setThemeIdx] = useState(0);
 
   const themes = ['theme-dark-glass', 'theme-light-glass', 'theme-dark-solid', 'theme-light-solid'];
+  const youtubePlaylistControlsUnavailable = platform === 'youtube';
 
   // Khởi tạo child webview YouTube Music và lắng nghe sự kiện scraper
   useEffect(() => {
@@ -80,7 +81,10 @@ export const App: React.FC = () => {
     localStorage.setItem('yt-mini-accent', accentColor);
 
     const body = document.body;
-    body.className = themes[themeIdx];
+    // Không gán body.className trực tiếp: dữ liệu bài hát mới sẽ chạy effect này
+    // và vô tình xóa class `compact` do ResizeObserver quản lý.
+    body.classList.remove(...themes);
+    body.classList.add(themes[themeIdx]);
 
     if (vinylSpin) body.classList.add('vinyl-mode');
     if (isPlaying) body.classList.add('is-playing');
@@ -469,8 +473,9 @@ export const App: React.FC = () => {
           <div className="playback-controls">
             <button
               id="shuffle"
-              title="Trộn bài"
-              className={isShuffle ? 'active' : ''}
+              title={youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ trộn trong playlist/queue' : 'Trộn bài'}
+              className={`${isShuffle ? 'active' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable}
               onClick={() => handleControl('shuffle')}
             >
               <i className="fa-solid fa-shuffle"></i>
@@ -490,8 +495,9 @@ export const App: React.FC = () => {
             </button>
             <button
               id="loop"
-              title="Lặp lại"
-              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''}`.trim()}
+              title={youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ lặp trong playlist/queue' : 'Lặp lại'}
+              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable}
               onClick={() => handleControl('loop')}
             >
               <i className="fa-solid fa-repeat"></i>
