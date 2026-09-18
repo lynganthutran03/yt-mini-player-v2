@@ -42,6 +42,7 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [accentColor, setAccentColor] = useState(localStorage.getItem('yt-mini-accent') || '#ff4444');
   const [vinylSpin, setVinylSpin] = useState(localStorage.getItem('yt-mini-vinyl') !== 'false');
+  const [alwaysOnTop, setAlwaysOnTop] = useState(localStorage.getItem('yt-mini-always-on-top') !== 'false');
   const [themeIdx, setThemeIdx] = useState(0);
 
   const themes = ['theme-dark-glass', 'theme-light-glass', 'theme-dark-solid', 'theme-light-solid'];
@@ -101,6 +102,12 @@ export const App: React.FC = () => {
     body.classList.toggle('settings-open', isSettingsOpen);
     body.classList.toggle('player-fullscreen', isPlayerFullscreen);
   }, [isPlaying, vinylSpin, accentColor, isExpanded, isSettingsOpen, isPlayerFullscreen, themeIdx]);
+
+  useEffect(() => {
+    invoke('set_always_on_top', { enabled: alwaysOnTop }).catch((err) => {
+      console.warn('set_always_on_top error:', err);
+    });
+  }, [alwaysOnTop]);
 
   // Đóng ứng dụng
   const handleClose = async () => {
@@ -361,7 +368,7 @@ export const App: React.FC = () => {
 
     setIsSettingsOpen(open);
     try {
-      await invoke('resize_modal', { isOpen: open, height: open ? 380 : 130 });
+      await invoke('resize_modal', { isOpen: open, height: open ? 200 : 130 });
     } catch (err) {
       console.warn('resize_modal error:', err);
     }
@@ -617,6 +624,23 @@ export const App: React.FC = () => {
                     onChange={(e) => {
                       setVinylSpin(e.target.checked);
                       localStorage.setItem('yt-mini-vinyl', e.target.checked ? 'true' : 'false');
+                    }}
+                  />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <div className="menu-item" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <i className="fa-solid fa-thumbtack"></i> Ghim cửa sổ
+                </span>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={alwaysOnTop}
+                    onChange={(e) => {
+                      setAlwaysOnTop(e.target.checked);
+                      localStorage.setItem('yt-mini-always-on-top', e.target.checked ? 'true' : 'false');
                     }}
                   />
                   <span className="slider"></span>

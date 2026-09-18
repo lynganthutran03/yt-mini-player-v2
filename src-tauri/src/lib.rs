@@ -23,6 +23,13 @@ fn close_app(app: AppHandle) {
 }
 
 #[tauri::command]
+fn set_always_on_top(window: tauri::Window, enabled: bool) -> Result<(), String> {
+    window
+        .set_always_on_top(enabled)
+        .map_err(|e| format!("Failed to set always-on-top state: {e}"))
+}
+
+#[tauri::command]
 fn init_player_webview(app: AppHandle, window: tauri::Window) {
     if PLAYER_WEBVIEW_INIT_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -734,7 +741,7 @@ fn resize_modal(
     let main_win = window;
 
     if is_open {
-        let h = height.unwrap_or(380);
+        let h = height.unwrap_or(200);
         let geometry = WindowGeometry {
             position: main_win
                 .outer_position()
@@ -790,6 +797,7 @@ pub fn run() {
         .manage(WindowRestoreState::default())
         .invoke_handler(tauri::generate_handler![
             close_app,
+            set_always_on_top,
             init_player_webview,
             control_player,
             switch_platform,

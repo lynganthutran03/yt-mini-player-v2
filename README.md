@@ -6,7 +6,7 @@ Built with Tauri 2, React, TypeScript, and Vite, the app embeds the selected pla
 
 ## Features
 
-- A borderless, transparent, always-on-top mini window that can be dragged and resized.
+- A borderless, transparent mini window that can be dragged, resized, and optionally kept always on top.
 - Displays artwork, track title, artist/album, playback state, and progress.
 - Play/pause, previous/next, seek, volume, and mute controls.
 - Quickly switch between YouTube Music, YouTube, and SoundCloud.
