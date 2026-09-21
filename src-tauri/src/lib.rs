@@ -88,15 +88,6 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
         document.addEventListener('webkitfullscreenchange', emitFullscreenState);
         window.setTimeout(() => emitFullscreenState(true), 0);
 
-        // Trigger V8 Garbage Collection periodically (every 30s) if exposed
-        setInterval(() => {
-            try {
-                if (typeof window.gc === 'function') {
-                    window.gc();
-                }
-            } catch(e) {}
-        }, 30000);
-
         // When in background mini-player mode, reduce video decoding workload
         window.__miniPlayerExpanded = false;
         window.__setExpandedMode = (expanded) => {

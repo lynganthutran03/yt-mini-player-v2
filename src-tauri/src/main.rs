@@ -2,21 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // Aggressive Chromium memory tuning:
-    // - Limit V8 JavaScript heap size to 128MB
-    // - Disable GPU rasterization & frame buffering caches for invisible webview
-    // - Enable aggressive memory trimming and single-process network service
+    // Chromium arguments:
+    // Do NOT strictly cap V8 heap (--max-old-space-size=128) because YouTube Music's
+    // SPA bundle alone needs ~200-300MB of JS heap to compile and run. Capping it
+    // causes V8 to throw "Out of Memory" (OOM) and crash the tab.
     let existing_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-    let memory_args = "--js-flags=\"--max-old-space-size=128 --optimize-for-size --expose-gc\" \
-                       --disable-background-networking \
+    let memory_args = "--disable-background-networking \
                        --disable-component-update \
-                       --disable-features=Translate,OptimizationHints,MediaRouter,AudioServiceOutOfProcess \
-                       --enable-features=NetworkServiceInProcess \
-                       --disable-gpu-memory-buffer-video-frames \
-                       --disable-gpu-compositing \
-                       --in-process-gpu \
-                       --disk-cache-size=10485760 \
-                       --media-cache-size=10485760 \
+                       --disable-features=Translate,OptimizationHints,MediaRouter \
                        --autoplay-policy=no-user-gesture-required";
 
     let combined_args = if existing_args.is_empty() {
