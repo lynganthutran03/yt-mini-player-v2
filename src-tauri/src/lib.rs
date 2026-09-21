@@ -88,7 +88,49 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
         document.addEventListener('webkitfullscreenchange', emitFullscreenState);
         window.setTimeout(() => emitFullscreenState(true), 0);
 
-        // Periodic scraper for YouTube Music
+        // Trigger V8 Garbage Collection periodically (every 30s) if exposed
+        setInterval(() => {
+            try {
+                if (typeof window.gc === 'function') {
+                    window.gc();
+                }
+            } catch(e) {}
+        }, 30000);
+
+        // When in background mini-player mode, reduce video decoding workload
+        window.__miniPlayerExpanded = false;
+        window.__setExpandedMode = (expanded) => {
+            window.__miniPlayerExpanded = Boolean(expanded);
+            try {
+                const videos = document.querySelectorAll('video');
+                videos.forEach(v => {
+                    if (!v) return;
+                    if (window.__miniPlayerExpanded) {
+                        // Phóng to: Khôi phục hiển thị và render đầy đủ
+                        v.removeAttribute('disablepictureinpicture');
+                    } else {
+                        // Thu nhỏ mini: Giảm tải visual rendering
+                        v.setAttribute('disablepictureinpicture', 'true');
+                    }
+                });
+            } catch(e) {}
+        };
+
+
+        let lastEmittedState = '';
+        const emitMusicData = (data) => {
+            try {
+                if (!window.__TAURI__ || !window.__TAURI__.event) return;
+                // Truncate currentTime to 1 decimal place to avoid flooding IPC events every frame
+                const roundedTime = typeof data.currentTime === 'number' ? Math.floor(data.currentTime) : 0;
+                const signature = `${data.title}|${data.artist}|${data.thumb}|${data.isPlaying}|${data.volume}|${data.isShuffleActive}|${data.loopState}|${roundedTime}|${data.duration}`;
+                if (signature === lastEmittedState) return;
+                lastEmittedState = signature;
+                window.__TAURI__.event.emit('yt-music-data', data);
+            } catch(e) {}
+        };
+
+        // Periodic scraper for YouTube Music (ran every 1000ms instead of 500ms to save CPU & RAM)
         setInterval(() => {
             try {
                 emitFullscreenState();
@@ -116,20 +158,18 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                             ? Boolean(youtubePlayer.getLoop())
                             : repeatButton?.getAttribute('aria-pressed') === 'true' || repeatButton?.classList.contains('ytp-button-active');
 
-                        if (window.__TAURI__ && window.__TAURI__.event) {
-                            window.__TAURI__.event.emit('yt-music-data', {
-                                title: titleEl ? (titleEl.innerText || titleEl.textContent || '').trim() : document.title.replace(/\s*-\s*YouTube\s*$/, ''),
-                                artist: artistEl ? (artistEl.innerText || artistEl.textContent || '').trim() : 'YouTube',
-                                album: '',
-                                thumb,
-                                isPlaying: Boolean(video && !video.paused),
-                                volume: video ? Math.round((video.muted ? 0 : video.volume) * 100) : 100,
-                                isShuffleActive,
-                                loopState: isLoopActive ? 'all' : 'none',
-                                currentTime: video?.currentTime || 0,
-                                duration: video?.duration || 0
-                            });
-                        }
+                        emitMusicData({
+                            title: titleEl ? (titleEl.innerText || titleEl.textContent || '').trim() : document.title.replace(/\s*-\s*YouTube\s*$/, ''),
+                            artist: artistEl ? (artistEl.innerText || artistEl.textContent || '').trim() : 'YouTube',
+                            album: '',
+                            thumb,
+                            isPlaying: Boolean(video && !video.paused),
+                            volume: video ? Math.round((video.muted ? 0 : video.volume) * 100) : 100,
+                            isShuffleActive,
+                            loopState: isLoopActive ? 'all' : 'none',
+                            currentTime: video?.currentTime || 0,
+                            duration: video?.duration || 0
+                        });
                     }
                     if (location.hostname.includes('soundcloud.com')) {
                         const audio = document.querySelector('audio');
@@ -158,26 +198,6 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                         const playLabel = (playControl?.getAttribute('title') || playControl?.getAttribute('aria-label') || '').toLowerCase();
                         const isPlaying = audio ? !audio.paused : /pause|tạm dừng|tam dung/.test(playLabel) || playControl?.classList.contains('playing');
                         const volumeValue = audio ? Math.round((audio.muted ? 0 : audio.volume) * 100) : (soundcloudVolume?.getAttribute('data-level') !== null ? Number(soundcloudVolume.getAttribute('data-level')) * 10 : Number(volumeControl?.value || volumeControl?.getAttribute('aria-valuenow') || 100));
-                        if (window.__TAURI__ && window.__TAURI__.event) {
-                            window.__TAURI__.event.emit('soundcloud-debug', {
-                                hostname: location.hostname,
-                                titleFound: Boolean(titleEl),
-                                audioFound: Boolean(audio),
-                                artworkFound: Boolean(artworkEl || artworkBg),
-                                images: [...document.images].slice(0, 20).map(img => ({ src: img.currentSrc || img.src, className: img.className, alt: img.alt })),
-                                titleHtml: titleEl?.outerHTML?.slice(0, 1000) || '',
-                                parentHtml: titleEl?.parentElement?.parentElement?.outerHTML?.slice(0, 2000) || '',
-                                timePassed: timePassedEl?.textContent || '',
-                                duration: durationEl?.textContent || '',
-                                volumeHtml: volumeControl?.outerHTML?.slice(0, 1000) || '',
-                                controls: [...document.querySelectorAll('button')].filter(button => /play|pause|volume|shuffle|repeat|loop/i.test(`${button.className} ${button.title} ${button.getAttribute('aria-label') || ''}`)).map(button => button.outerHTML.slice(0, 500)),
-                                shuffleState: shuffleControl ? { className: shuffleControl.className, ariaPressed: shuffleControl.getAttribute('aria-pressed'), dataState: shuffleControl.getAttribute('data-state') } : null,
-                                repeatState: repeatControl ? { className: repeatControl.className, ariaPressed: repeatControl.getAttribute('aria-pressed'), dataState: repeatControl.getAttribute('data-state') } : null,
-                                volumeButton: document.querySelector('.volume__button')?.outerHTML?.slice(0, 1000) || '',
-                                volumeStorage: Object.keys(localStorage).filter(key => /volume/i.test(key)).map(key => ({ key, value: localStorage.getItem(key) })),
-                                volumeElements: [...document.querySelectorAll('[class*="volume"]')].map(element => element.outerHTML.slice(0, 1500)),
-                            });
-                        }
                         // The page metadata changes while browsing feeds. Only
                         // emit data from SoundCloud's persistent player bar.
                         if (!titleEl) return;
@@ -196,17 +216,15 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                                 })
                                 .catch(() => {});
                         }
-                        if (window.__TAURI__ && window.__TAURI__.event) {
-                            window.__TAURI__.event.emit('yt-music-data', {
-                                title, artist, album: '', thumb: window.__scArtworkUrl || hydratedArtwork || artworkEl?.src || artworkBg || imageMeta?.content || '',
-                                isPlaying: Boolean(isPlaying),
-                                volume: volumeValue,
-                                isShuffleActive: shuffleControl?.classList.contains('m-shuffling') || shuffleControl?.classList.contains('m-active'),
-                                loopState: repeatControl?.classList.contains('m-one') ? 'one' : (repeatControl?.classList.contains('m-repeating') || repeatControl?.classList.contains('m-all') || repeatControl?.classList.contains('m-active') ? 'all' : 'none'),
-                                currentTime: audio?.currentTime || parseTime(timePassedEl?.textContent),
-                                duration: audio?.duration || parseTime(durationEl?.textContent)
-                            });
-                        }
+                        emitMusicData({
+                            title, artist, album: '', thumb: window.__scArtworkUrl || hydratedArtwork || artworkEl?.src || artworkBg || imageMeta?.content || '',
+                            isPlaying: Boolean(isPlaying),
+                            volume: volumeValue,
+                            isShuffleActive: shuffleControl?.classList.contains('m-shuffling') || shuffleControl?.classList.contains('m-active'),
+                            loopState: repeatControl?.classList.contains('m-one') ? 'one' : (repeatControl?.classList.contains('m-repeating') || repeatControl?.classList.contains('m-all') || repeatControl?.classList.contains('m-active') ? 'all' : 'none'),
+                            currentTime: audio?.currentTime || parseTime(timePassedEl?.textContent),
+                            duration: audio?.duration || parseTime(durationEl?.textContent)
+                        });
                     }
                     return;
                 }
@@ -329,23 +347,21 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
                     repeatMode: playerBar.repeatMode ?? playerBar.repeatMode_ ?? playerBar._repeatMode,
                 }) : 'repeat button not found';
 
-                if (window.__TAURI__ && window.__TAURI__.event) {
-                    window.__TAURI__.event.emit('yt-music-data', {
-                        title,
-                        artist,
-                        album,
-                        thumb,
-                        isPlaying,
-                        volume,
-                        isShuffleActive,
-                        loopState,
-                        repeatDebug,
-                        currentTime,
-                        duration
-                    });
-                }
+                emitMusicData({
+                    title,
+                    artist,
+                    album,
+                    thumb,
+                    isPlaying,
+                    volume,
+                    isShuffleActive,
+                    loopState,
+                    repeatDebug,
+                    currentTime,
+                    duration
+                });
             } catch(e) {}
-        }, 500);
+        }, 1000);
     "#;
 
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
@@ -655,6 +671,7 @@ fn toggle_expand_view(
         webview
             .set_focus()
             .map_err(|e| format!("Failed to focus player: {e}"))?;
+        let _ = webview.eval("if (window.__setExpandedMode) window.__setExpandedMode(true);");
     } else {
         // Thu nhỏ cửa sổ chính về 420x130 Logical
         let saved_geometry = restore_state
@@ -683,6 +700,8 @@ fn toggle_expand_view(
         let webview = app
             .get_webview("yt-player")
             .ok_or_else(|| "Player webview not found".to_string())?;
+
+        let _ = webview.eval("if (window.__setExpandedMode) window.__setExpandedMode(false);");
 
         // Park webview về 1x1 ở góc ngoài tầm nhìn
         let phys_pos = PhysicalPosition::new(

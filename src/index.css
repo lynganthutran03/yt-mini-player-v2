@@ -97,6 +97,31 @@ body.player-fullscreen .resize-corner {
   color: #ff5500 !important;
 }
 
+/* Compact mode: Hiển thị icon platform ở cụm tiện ích cạnh nút Cài đặt & Phóng to */
+body.compact .platform-selector-wrapper {
+  display: flex !important;
+  width: 22px;
+  height: 22px;
+  -webkit-app-region: no-drag;
+}
+
+body.compact .platform-selector-wrapper .platform-brand {
+  font-size: 11px;
+}
+
+body.compact .platform-selector-wrapper .platform-brand-music {
+  width: 14px;
+  height: 14px;
+  border-width: 1.5px;
+}
+
+body.compact .youtube-music-play {
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 4.5px solid #ff0000;
+}
+
+
 #loop.repeat-one::after {
   content: none;
 }
