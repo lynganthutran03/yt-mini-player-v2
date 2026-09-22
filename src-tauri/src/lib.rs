@@ -435,6 +435,46 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
         document.addEventListener('webkitfullscreenchange', emitFullscreenState);
         window.setTimeout(() => emitFullscreenState(true), 0);
 
+        // WebView2's native page-finished event fires before SPA pages have
+        // mounted their player UI. Wait for the site-specific shell instead.
+        const emitDocumentReady = () => {
+            try {
+                if (!window.__TAURI__ || !window.__TAURI__.event) return;
+                window.__TAURI__.event.emit('player-document-ready', {
+                    host: location.hostname
+                });
+            } catch(e) {}
+        };
+        const hasPlayerUi = () => {
+            const host = location.hostname;
+            if (host === 'music.youtube.com') {
+                return Boolean(document.querySelector('ytmusic-app ytmusic-player-bar, ytmusic-app ytmusic-nav-bar'));
+            }
+            if (host === 'youtube.com' || host === 'www.youtube.com') {
+                return Boolean(document.querySelector('ytd-app #masthead, ytd-app #content'));
+            }
+            if (host === 'soundcloud.com' || host === 'www.soundcloud.com') {
+                return Boolean(document.querySelector('#app .playControls, #app #content'));
+            }
+            return document.readyState === 'complete';
+        };
+        const waitForPlayerUi = () => {
+            let attempts = 0;
+            let stableChecks = 0;
+            const check = () => {
+                attempts += 1;
+                stableChecks = hasPlayerUi() ? stableChecks + 1 : 0;
+                if (stableChecks >= 3 || attempts >= 40) {
+                    emitDocumentReady();
+                    return;
+                }
+                window.setTimeout(check, 250);
+            };
+            requestAnimationFrame(() => requestAnimationFrame(check));
+        };
+        if (document.readyState === 'complete') waitForPlayerUi();
+        else window.addEventListener('load', waitForPlayerUi, { once: true });
+
         // When in background mini-player mode, reduce video decoding workload
         window.__miniPlayerExpanded = false;
         window.__setExpandedMode = (expanded) => {

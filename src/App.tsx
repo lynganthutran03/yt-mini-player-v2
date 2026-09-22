@@ -28,6 +28,10 @@ interface PlayerLoadData {
   status: 'loading' | 'ready' | 'failed';
 }
 
+interface PlayerDocumentReadyData {
+  host: string;
+}
+
 interface LocalMusicFolder {
   name: string;
   paths: string[];
@@ -56,6 +60,8 @@ export const App: React.FC = () => {
   const [selectedLocalFolder, setSelectedLocalFolder] = useState<string | 'all' | null>(null);
   const [autoNextFolder, setAutoNextFolder] = useState(false);
   const loadTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | undefined>(undefined);
+  const loadStateTimerRef = useRef<ReturnType<typeof window.setTimeout> | undefined>(undefined);
+  const loadingStartedAtRef = useRef<number | undefined>(undefined);
   const platformRef = useRef(platform);
   const localVolumeRef = useRef(initialLocalVolume);
 
@@ -71,8 +77,22 @@ export const App: React.FC = () => {
   const themes = ['theme-dark-glass', 'theme-light-glass', 'theme-dark-solid', 'theme-light-solid'];
   const youtubePlaylistControlsUnavailable = platform === 'youtube';
   const platformLabel = platform === 'youtube-music' ? 'YouTube Music' : platform === 'youtube' ? 'YouTube' : platform === 'soundcloud' ? 'SoundCloud' : t('platform.local');
-  const showBrowserLoading = isExpanded && playerLoadState === 'loading';
-  const loadingTitle = t('player.opening', { platform: platformLabel });
+
+  const beginPlayerLoading = () => {
+    if (loadStateTimerRef.current) window.clearTimeout(loadStateTimerRef.current);
+    loadingStartedAtRef.current = performance.now();
+    setPlayerLoadState('loading');
+  };
+
+  const finishPlayerLoading = (status: 'ready' | 'failed') => {
+    if (loadStateTimerRef.current) window.clearTimeout(loadStateTimerRef.current);
+    const delay = 0;
+    loadStateTimerRef.current = window.setTimeout(() => {
+      setPlayerLoadState(status);
+      loadingStartedAtRef.current = undefined;
+      loadStateTimerRef.current = undefined;
+    }, delay);
+  };
 
   useEffect(() => {
     platformRef.current = platform;
@@ -112,16 +132,27 @@ export const App: React.FC = () => {
         }
         setVolume(data.volume);
       }
-      // A valid metadata event is the most reliable signal that a SPA player is
-      // actually usable, even if the browser's document-finished event was missed.
-      setPlayerLoadState('ready');
     });
     const unlistenFullscreenPromise = listen<PlayerFullscreenData>('player-fullscreen-state', (event) => {
       setIsPlayerFullscreen(Boolean(event.payload.isFullscreen));
     });
     const unlistenLoadPromise = listen<PlayerLoadData>('player-load-state', (event) => {
-      setPlayerLoadState(event.payload.status);
-      if (event.payload.status !== 'loading' && loadTimeoutRef.current) {
+      if (event.payload.status === 'loading') beginPlayerLoading();
+      else if (event.payload.status === 'failed') finishPlayerLoading('failed');
+      if (event.payload.status === 'failed' && loadTimeoutRef.current) {
+        window.clearTimeout(loadTimeoutRef.current);
+        loadTimeoutRef.current = undefined;
+      }
+    });
+    const unlistenDocumentReadyPromise = listen<PlayerDocumentReadyData>('player-document-ready', (event) => {
+      const host = event.payload.host;
+      const expectedPlatform = platformRef.current;
+      const matches = (expectedPlatform === 'youtube-music' && host === 'music.youtube.com')
+        || (expectedPlatform === 'youtube' && (host === 'youtube.com' || host === 'www.youtube.com'))
+        || (expectedPlatform === 'soundcloud' && (host === 'soundcloud.com' || host === 'www.soundcloud.com'));
+      if (!matches) return;
+      finishPlayerLoading('ready');
+      if (loadTimeoutRef.current) {
         window.clearTimeout(loadTimeoutRef.current);
         loadTimeoutRef.current = undefined;
       }
@@ -141,9 +172,11 @@ export const App: React.FC = () => {
       unlistenDataPromise.then((unlisten) => unlisten());
       unlistenFullscreenPromise.then((unlisten) => unlisten());
       unlistenLoadPromise.then((unlisten) => unlisten());
+      unlistenDocumentReadyPromise.then((unlisten) => unlisten());
       unlistenLocalAudioErrorPromise.then((unlisten) => unlisten());
       window.clearTimeout(initialReadyTimeout);
       if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
+      if (loadStateTimerRef.current) window.clearTimeout(loadStateTimerRef.current);
     };
   }, []);
 
@@ -230,10 +263,10 @@ export const App: React.FC = () => {
     }
 
     setPlatform(newPlatform);
-    setPlayerLoadState('loading');
+    beginPlayerLoading();
     if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
     loadTimeoutRef.current = window.setTimeout(() => {
-      setPlayerLoadState((current) => current === 'loading' ? 'failed' : current);
+      finishPlayerLoading('failed');
       loadTimeoutRef.current = undefined;
     }, 20_000);
     try {
@@ -426,7 +459,7 @@ export const App: React.FC = () => {
     const ytView = document.getElementById('yt-view');
     if (!ytView) return;
 
-    const observer = new ResizeObserver(() => {
+    const resizeWebview = () => {
       if (isExpanded) {
         const rect = ytView.getBoundingClientRect();
         invoke('resize_yt_view', {
@@ -436,11 +469,13 @@ export const App: React.FC = () => {
           height: rect.height
         }).catch(() => {});
       }
-    });
+    };
 
+    const observer = new ResizeObserver(resizeWebview);
     observer.observe(ytView);
+    resizeWebview();
     return () => observer.disconnect();
-  }, [isExpanded]);
+  }, [isExpanded, platform]);
 
   // Kiểm tra compact mode khi kéo cửa sổ xuống < 90px (như V1)
   useEffect(() => {
@@ -627,12 +662,11 @@ export const App: React.FC = () => {
           </div>
 
           <div className="song-info">
-            <div id="title" className="title player-title" title={playerLoadState === 'loading' ? loadingTitle : title}>
-              {playerLoadState === 'loading' && !showBrowserLoading && <span className="mini-load-spinner" aria-label={t('player.loading', { platform: platformLabel })} />}
-              <span>{playerLoadState === 'loading' ? loadingTitle : title}</span>
+            <div id="title" className="title player-title" title={title || platformLabel}>
+              <span>{title || platformLabel}</span>
             </div>
             <div className="artist">
-              <span id="artist">{playerLoadState === 'loading' ? t('player.loadingWeb') : playerLoadState === 'failed' ? t('player.failed') : artist}</span>
+              <span id="artist">{playerLoadState === 'failed' ? t('player.failed') : artist}</span>
               <span id="album">{album}</span>
             </div>
           </div>
@@ -767,12 +801,6 @@ export const App: React.FC = () => {
       </div>
 
       {/* Vùng hiển thị webview khi mở rộng */}
-      {showBrowserLoading && (
-        <div className="browser-loading-strip" role="status">
-          <span className="mini-load-spinner" aria-hidden="true" />
-          <span>{t('player.loading', { platform: platformLabel })}</span>
-        </div>
-      )}
       {platform === 'local' && isExpanded ? (
         <div id="local-library" className="expanded">
           <div className="local-library-header">
