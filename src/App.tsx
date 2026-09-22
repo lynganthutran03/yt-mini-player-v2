@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { currentMonitor, getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalPosition, LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
@@ -22,6 +22,10 @@ interface PlayerFullscreenData {
   isFullscreen: boolean;
 }
 
+interface PlayerLoadData {
+  status: 'loading' | 'ready' | 'failed';
+}
+
 export const App: React.FC = () => {
   // Trạng thái bài hát thực tế nhận từ Webview
   const [title, setTitle] = useState('Đang kết nối YouTube Music...');
@@ -35,6 +39,8 @@ export const App: React.FC = () => {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(100);
   const [platform, setPlatform] = useState('youtube-music');
+  const [playerLoadState, setPlayerLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const loadTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | undefined>(undefined);
 
   // Trạng thái giao diện
   const [isExpanded, setIsExpanded] = useState(false);
@@ -47,6 +53,9 @@ export const App: React.FC = () => {
 
   const themes = ['theme-dark-glass', 'theme-light-glass', 'theme-dark-solid', 'theme-light-solid'];
   const youtubePlaylistControlsUnavailable = platform === 'youtube';
+  const localPlaylistControlsUnavailable = platform === 'local';
+  const platformLabel = platform === 'youtube-music' ? 'YouTube Music' : platform === 'youtube' ? 'YouTube' : platform === 'soundcloud' ? 'SoundCloud' : 'Nhạc trên máy';
+  const showBrowserLoading = isExpanded && playerLoadState === 'loading';
 
   // Khởi tạo child webview YouTube Music và lắng nghe sự kiện scraper
   useEffect(() => {
@@ -74,14 +83,31 @@ export const App: React.FC = () => {
       if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
       if (typeof data.duration === 'number') setDuration(data.duration);
       if (typeof data.volume === 'number') setVolume(data.volume);
+      // A valid metadata event is the most reliable signal that a SPA player is
+      // actually usable, even if the browser's document-finished event was missed.
+      setPlayerLoadState('ready');
     });
     const unlistenFullscreenPromise = listen<PlayerFullscreenData>('player-fullscreen-state', (event) => {
       setIsPlayerFullscreen(Boolean(event.payload.isFullscreen));
     });
-
+    const unlistenLoadPromise = listen<PlayerLoadData>('player-load-state', (event) => {
+      setPlayerLoadState(event.payload.status);
+      if (event.payload.status !== 'loading' && loadTimeoutRef.current) {
+        window.clearTimeout(loadTimeoutRef.current);
+        loadTimeoutRef.current = undefined;
+      }
+    });
+    const unlistenLocalAudioErrorPromise = listen<string>('local-audio-error', (event) => {
+      setPlayerLoadState('failed');
+      setTitle('Không thể phát file nhạc');
+      setArtist(event.payload);
+    });
     return () => {
       unlistenDataPromise.then((unlisten) => unlisten());
       unlistenFullscreenPromise.then((unlisten) => unlisten());
+      unlistenLoadPromise.then((unlisten) => unlisten());
+      unlistenLocalAudioErrorPromise.then((unlisten) => unlisten());
+      if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
     };
   }, []);
 
@@ -122,6 +148,8 @@ export const App: React.FC = () => {
   const handleControl = async (action: string, value?: number) => {
     try {
       await invoke('control_player', { action, value });
+      if (platform === 'local' && action === 'play-pause') setIsPlaying((current) => !current);
+      if (platform === 'local' && action === 'volume' && typeof value === 'number') setVolume(Math.round(value * 100));
     } catch (err) {
       console.warn('control_player error:', err);
     }
@@ -129,10 +157,36 @@ export const App: React.FC = () => {
 
   // Chuyển nền tảng
   const handleSwitchPlatform = async (newPlatform: string) => {
+    if (newPlatform === 'local') {
+      const path = await invoke<string | null>('pick_local_music_file');
+      if (!path) return;
+      if (isExpanded) {
+        await invoke('toggle_expand_view', { isExpanded: false });
+        setIsExpanded(false);
+      }
+      setPlatform(newPlatform);
+      try {
+        await invoke('switch_platform', { platform: newPlatform });
+        await invoke('play_local_file', { path });
+        setPlayerLoadState('ready');
+      } catch (err) {
+        setPlayerLoadState('failed');
+        console.warn('local_music error:', err);
+      }
+      return;
+    }
+
     setPlatform(newPlatform);
+    setPlayerLoadState('loading');
+    if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
+    loadTimeoutRef.current = window.setTimeout(() => {
+      setPlayerLoadState((current) => current === 'loading' ? 'failed' : current);
+      loadTimeoutRef.current = undefined;
+    }, 20_000);
     try {
       await invoke('switch_platform', { platform: newPlatform });
     } catch (err) {
+      setPlayerLoadState('failed');
       console.warn('switch_platform error:', err);
     }
   };
@@ -449,9 +503,12 @@ export const App: React.FC = () => {
           </div>
 
           <div className="song-info">
-            <div id="title" className="title" title={title}>{title}</div>
+            <div id="title" className="title player-title" title={playerLoadState === 'loading' && !showBrowserLoading ? `Đang mở ${platformLabel}…` : title}>
+              {playerLoadState === 'loading' && !showBrowserLoading && <span className="mini-load-spinner" aria-label="Đang tải" />}
+              <span>{playerLoadState === 'loading' && !showBrowserLoading ? `Đang mở ${platformLabel}…` : title}</span>
+            </div>
             <div className="artist">
-              <span id="artist">{artist}</span>
+              <span id="artist">{playerLoadState === 'loading' && !showBrowserLoading ? 'Đang tải web player' : playerLoadState === 'failed' ? 'Không thể tải trang' : artist}</span>
               <span id="album">{album}</span>
             </div>
           </div>
@@ -490,9 +547,9 @@ export const App: React.FC = () => {
           <div className="playback-controls">
             <button
               id="shuffle"
-              title={youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ trộn trong playlist/queue' : 'Trộn bài'}
-              className={`${isShuffle ? 'active' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
-              disabled={youtubePlaylistControlsUnavailable}
+              title={localPlaylistControlsUnavailable ? 'Nhạc trên máy MVP hiện phát một bài một lần' : youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ trộn trong playlist/queue' : 'Trộn bài'}
+              className={`${isShuffle ? 'active' : ''} ${(youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable) ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable}
               onClick={() => handleControl('shuffle')}
             >
               <i className="fa-solid fa-shuffle"></i>
@@ -512,9 +569,9 @@ export const App: React.FC = () => {
             </button>
             <button
               id="loop"
-              title={youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ lặp trong playlist/queue' : 'Lặp lại'}
-              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
-              disabled={youtubePlaylistControlsUnavailable}
+              title={localPlaylistControlsUnavailable ? 'Nhạc trên máy MVP hiện phát một bài một lần' : youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ lặp trong playlist/queue' : 'Lặp lại'}
+              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''} ${(youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable) ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable}
               onClick={() => handleControl('loop')}
             >
               <i className="fa-solid fa-repeat"></i>
@@ -553,8 +610,10 @@ export const App: React.FC = () => {
                 </span>
               ) : platform === 'youtube' ? (
                 <i id="platform-icon" className="platform-brand fa-brands fa-youtube" aria-label="YouTube"></i>
-              ) : (
+              ) : platform === 'soundcloud' ? (
                 <i id="platform-icon" className="platform-brand fa-brands fa-soundcloud" aria-label="SoundCloud"></i>
+              ) : (
+                <i id="platform-icon" className="platform-brand fa-solid fa-music" aria-label="Nhạc trên máy"></i>
               )}
               <select
                 id="platform-select"
@@ -565,6 +624,7 @@ export const App: React.FC = () => {
                 <option value="youtube-music">YouTube Music</option>
                 <option value="youtube">YouTube</option>
                 <option value="soundcloud">SoundCloud</option>
+                <option value="local">Nhạc trên máy (MVP)</option>
               </select>
             </div>
 
@@ -583,6 +643,12 @@ export const App: React.FC = () => {
       </div>
 
       {/* Vùng hiển thị webview khi mở rộng */}
+      {showBrowserLoading && (
+        <div className="browser-loading-strip" role="status">
+          <span className="mini-load-spinner" aria-hidden="true" />
+          <span>Đang tải {platformLabel}…</span>
+        </div>
+      )}
       <div id="yt-view" className={isExpanded ? 'expanded' : ''}></div>
 
       {/* Modal Cài đặt chuẩn V1 */}

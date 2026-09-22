@@ -1,10 +1,14 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, Sender},
     Arc, Mutex,
 };
+use std::{fs::File, io::BufReader};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewBuilder, WebviewUrl,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewBuilder, WebviewUrl,
 };
+use serde::Serialize;
 
 static PLAYER_WEBVIEW_INIT_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -17,9 +21,156 @@ struct WindowGeometry {
 #[derive(Default)]
 struct WindowRestoreState(Mutex<Option<WindowGeometry>>);
 
+enum LocalAudioCommand {
+    Play { path: String, app: AppHandle },
+    TogglePause,
+    SetVolume(f32),
+    Stop,
+}
+
+struct LocalAudioState {
+    sender: Sender<LocalAudioCommand>,
+    is_active: AtomicBool,
+}
+
+impl LocalAudioState {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel::<LocalAudioCommand>();
+        std::thread::spawn(move || {
+            // Rodio's Windows stream is intentionally !Send. Keeping it on one
+            // dedicated thread is required by CPAL and keeps Tauri state safe.
+            let mut stream: Option<OutputStream> = None;
+            let mut sink: Option<Sink> = None;
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    LocalAudioCommand::Play { path, app } => {
+                        let result = (|| -> Result<(OutputStream, Sink, String, f64), String> {
+                            let file = File::open(&path)
+                                .map_err(|error| format!("Không thể mở file nhạc: {error}"))?;
+                            let source = Decoder::new(BufReader::new(file))
+                                .map_err(|error| format!("File nhạc không được hỗ trợ: {error}"))?;
+                            let duration = source.total_duration().map(|value| value.as_secs_f64()).unwrap_or(0.0);
+                            let (output_stream, stream_handle) = OutputStream::try_default()
+                                .map_err(|error| format!("Không thể khởi tạo audio output: {error}"))?;
+                            let next_sink = Sink::try_new(&stream_handle)
+                                .map_err(|error| format!("Không thể tạo audio player: {error}"))?;
+                            next_sink.append(source);
+                            next_sink.play();
+                            let title = std::path::Path::new(&path)
+                                .file_stem()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("Nhạc trên máy")
+                                .to_string();
+                            Ok((output_stream, next_sink, title, duration))
+                        })();
+
+                        match result {
+                            Ok((next_stream, next_sink, title, duration)) => {
+                                sink = Some(next_sink);
+                                stream = Some(next_stream);
+                                let _ = app.emit("yt-music-data", serde_json::json!({
+                                    "title": title,
+                                    "artist": "Nhạc trên máy",
+                                    "album": "",
+                                    "thumb": "",
+                                    "isPlaying": true,
+                                    "volume": 100,
+                                    "isShuffleActive": false,
+                                    "loopState": "none",
+                                    "currentTime": 0.0,
+                                    "duration": duration,
+                                }));
+                            }
+                            Err(error) => {
+                                let _ = app.emit("local-audio-error", error);
+                            }
+                        }
+                    }
+                    LocalAudioCommand::TogglePause => {
+                        if let Some(current_sink) = sink.as_ref() {
+                            if current_sink.is_paused() { current_sink.play(); } else { current_sink.pause(); }
+                        }
+                    }
+                    LocalAudioCommand::SetVolume(volume) => {
+                        if let Some(current_sink) = sink.as_ref() { current_sink.set_volume(volume); }
+                    }
+                    LocalAudioCommand::Stop => {
+                        sink.take();
+                        stream.take();
+                    }
+                }
+            }
+        });
+        Self { sender, is_active: AtomicBool::new(false) }
+    }
+}
+
+struct PlayerNavigationState(Mutex<String>);
+
+impl Default for PlayerNavigationState {
+    fn default() -> Self {
+        Self(Mutex::new("youtube-music".to_string()))
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerLoadEvent {
+    status: &'static str,
+}
+
+fn emit_player_load_state(app: &AppHandle, status: &'static str) {
+    // This event is intentionally best-effort. A missing frontend listener must
+    // never interrupt page navigation or media playback.
+    let _ = app.emit("player-load-state", PlayerLoadEvent { status });
+}
+
+fn set_expected_platform(app: &AppHandle, platform: &str) {
+    if let Ok(mut expected) = app.state::<PlayerNavigationState>().0.lock() {
+        *expected = platform.to_string();
+    }
+}
+
+fn navigation_matches_expected_platform(app: &AppHandle, host: &str) -> bool {
+    let expected = match app.state::<PlayerNavigationState>().0.lock() {
+        Ok(expected) => expected.clone(),
+        // Be conservative when state is unavailable: keep the webview hidden
+        // rather than flashing an outdated page above the loading UI.
+        Err(_) => return false,
+    };
+
+    match expected.as_str() {
+        "youtube-music" => host == "music.youtube.com",
+        "youtube" => matches!(host, "youtube.com" | "www.youtube.com"),
+        "soundcloud" => matches!(host, "soundcloud.com" | "www.soundcloud.com"),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 fn close_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+fn play_local_file(
+    app: AppHandle,
+    path: String,
+    local_audio: State<'_, LocalAudioState>,
+) -> Result<(), String> {
+    local_audio.is_active.store(true, Ordering::SeqCst);
+    local_audio
+        .sender
+        .send(LocalAudioCommand::Play { path, app })
+        .map_err(|_| "Native audio thread is unavailable".to_string())
+}
+
+#[tauri::command]
+fn pick_local_music_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("Audio", &["mp3", "flac", "wav", "ogg", "m4a", "aac"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -358,6 +509,7 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
     // Embed YouTube Music directly as a child webview of the main window
+    let player_page_events_app = app.clone();
     let webview = WebviewBuilder::new(
         "yt-player",
         WebviewUrl::External(
@@ -368,6 +520,37 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
     )
     .user_agent(user_agent)
     .initialization_script(init_script)
+    .on_page_load(move |_webview, payload| match payload.event() {
+        tauri::webview::PageLoadEvent::Started => {
+            emit_player_load_state(&player_page_events_app, "loading");
+        }
+        tauri::webview::PageLoadEvent::Finished => {
+            // WebView2 can still deliver a Finished event from the page we just
+            // left. Only the platform currently requested by the user may make
+            // the native child surface visible again.
+            if navigation_matches_expected_platform(
+                &player_page_events_app,
+                payload.url().host_str().unwrap_or(""),
+            ) {
+                // Do not hide/show the native WebView while navigating: doing
+                // so makes WebView2 replay the prior compositor frame. Keep it
+                // visible like a normal browser and update only the React mini
+                // chrome with its loading state.
+                let app_for_show = player_page_events_app.clone();
+                let loaded_host = payload.url().host_str().unwrap_or("").to_string();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let app_for_main = app_for_show.clone();
+                    let _ = app_for_show.run_on_main_thread(move || {
+                        if !navigation_matches_expected_platform(&app_for_main, &loaded_host) {
+                            return;
+                        }
+                        emit_player_load_state(&app_for_main, "ready");
+                    });
+                });
+            }
+        }
+    })
     .on_new_window(move |url, features| {
         let label = format!(
             "login-{}",
@@ -431,7 +614,28 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
 }
 
 #[tauri::command]
-fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<(), String> {
+fn control_player(
+    app: AppHandle,
+    action: String,
+    value: Option<f64>,
+    local_audio: State<'_, LocalAudioState>,
+) -> Result<(), String> {
+    if local_audio.is_active.load(Ordering::SeqCst) {
+        match action.as_str() {
+            "play-pause" => local_audio
+                .sender
+                .send(LocalAudioCommand::TogglePause)
+                .map_err(|_| "Native audio thread is unavailable".to_string())?,
+            "volume" => local_audio
+                .sender
+                .send(LocalAudioCommand::SetVolume(value.unwrap_or(1.0) as f32))
+                .map_err(|_| "Native audio thread is unavailable".to_string())?,
+            "next" | "prev" | "seek" | "shuffle" | "loop" => {}
+            _ => return Err(format!("Unknown action: {}", action)),
+        }
+        return Ok(());
+    }
+
     let webview = app
         .get_webview("yt-player")
         .ok_or_else(|| "Player webview not found".to_string())?;
@@ -580,7 +784,23 @@ fn control_player(app: AppHandle, action: String, value: Option<f64>) -> Result<
 }
 
 #[tauri::command]
-fn switch_platform(app: AppHandle, platform: String) -> Result<(), String> {
+fn switch_platform(
+    app: AppHandle,
+    platform: String,
+    local_audio: State<'_, LocalAudioState>,
+) -> Result<(), String> {
+    if platform != "local" {
+        local_audio.is_active.store(false, Ordering::SeqCst);
+        let _ = local_audio.sender.send(LocalAudioCommand::Stop);
+    }
+
+    if platform == "local" {
+        if let Some(webview) = app.get_webview("yt-player") {
+            let _ = webview.eval("document.querySelectorAll('video,audio').forEach(media => media.pause());");
+        }
+        return Ok(());
+    }
+
     let webview = app
         .get_webview("yt-player")
         .ok_or_else(|| "Player webview not found".to_string())?;
@@ -592,8 +812,18 @@ fn switch_platform(app: AppHandle, platform: String) -> Result<(), String> {
         _ => return Err("Invalid platform".to_string()),
     };
 
-    let script = format!("window.location.href = '{}';", url);
-    webview.eval(&script).map_err(|e| format!("{:?}", e))?;
+    emit_player_load_state(&app, "loading");
+    set_expected_platform(&app, &platform);
+    // Navigate through WebView2 itself instead of assigning location through
+    // JavaScript. Native navigation clears the outgoing document/compositor
+    // surface before loading the destination, avoiding a flash of the old site.
+    let target_url = url
+        .parse::<tauri::Url>()
+        .map_err(|error| format!("Invalid player URL: {error}"))?;
+    if let Err(error) = webview.navigate(target_url) {
+        emit_player_load_state(&app, "failed");
+        return Err(format!("{:?}", error));
+    }
 
     Ok(())
 }
@@ -805,10 +1035,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(WindowRestoreState::default())
+        .manage(PlayerNavigationState::default())
+        .manage(LocalAudioState::new())
         .invoke_handler(tauri::generate_handler![
             close_app,
             set_always_on_top,
             init_player_webview,
+            pick_local_music_file,
+            play_local_file,
             control_player,
             switch_platform,
             toggle_expand_view,
