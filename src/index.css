@@ -93,13 +93,14 @@ body.player-fullscreen .resize-corner {
 .local-library-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255,255,255,.1);
   color: rgba(255,255,255,.9);
   font-size: 13px;
 }
 
+.local-library-header > span:first-child { margin-right: auto; }
 .local-library-header span:last-child { color: rgba(255,255,255,.5); font-size: 12px; }
 .local-library-refresh { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: rgba(255,255,255,.68); background: transparent; cursor: pointer; }
 .local-library-refresh:hover { color: #fff; background: rgba(255,255,255,.1); }

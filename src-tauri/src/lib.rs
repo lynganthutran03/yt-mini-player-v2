@@ -47,6 +47,7 @@ struct ActiveLocalPlayback {
     app: AppHandle,
     title: String,
     duration: f64,
+    position_offset: Duration,
     shuffle: bool,
     repeat: LocalRepeatMode,
     last_progress_emit: Instant,
@@ -67,6 +68,26 @@ impl LocalRepeatMode {
 }
 
 fn create_local_playback(queue: Vec<String>, index: usize, app: AppHandle, volume: f32, shuffle: bool, repeat: LocalRepeatMode) -> Result<ActiveLocalPlayback, String> {
+    create_local_playback_at(
+        queue,
+        index,
+        app,
+        volume,
+        shuffle,
+        repeat,
+        Duration::from_secs(0),
+    )
+}
+
+fn create_local_playback_at(
+    queue: Vec<String>,
+    index: usize,
+    app: AppHandle,
+    volume: f32,
+    shuffle: bool,
+    repeat: LocalRepeatMode,
+    start_at: Duration,
+) -> Result<ActiveLocalPlayback, String> {
     let path = queue.get(index).ok_or_else(|| "Không còn bài trong hàng đợi".to_string())?;
     let file = File::open(path).map_err(|error| format!("Không thể mở file nhạc: {error}"))?;
     let source = Decoder::new(BufReader::new(file))
@@ -76,7 +97,11 @@ fn create_local_playback(queue: Vec<String>, index: usize, app: AppHandle, volum
         .map_err(|error| format!("Không thể khởi tạo audio output: {error}"))?;
     let sink = Sink::try_new(&stream_handle)
         .map_err(|error| format!("Không thể tạo audio player: {error}"))?;
-    sink.append(source);
+    if start_at > Duration::from_secs(0) {
+        sink.append(source.skip_duration(start_at));
+    } else {
+        sink.append(source);
+    }
     sink.set_volume(volume);
     sink.play();
     let title = std::path::Path::new(path)
@@ -84,7 +109,7 @@ fn create_local_playback(queue: Vec<String>, index: usize, app: AppHandle, volum
         .and_then(|name| name.to_str())
         .unwrap_or("Nhạc trên máy")
         .to_string();
-    Ok(ActiveLocalPlayback { _stream: stream, sink, queue, index, app, title, duration, shuffle, repeat, last_progress_emit: Instant::now() - Duration::from_secs(1) })
+    Ok(ActiveLocalPlayback { _stream: stream, sink, queue, index, app, title, duration, position_offset: start_at, shuffle, repeat, last_progress_emit: Instant::now() - Duration::from_secs(1) })
 }
 
 fn emit_local_playback(playback: &ActiveLocalPlayback) {
@@ -98,7 +123,7 @@ fn emit_local_playback(playback: &ActiveLocalPlayback) {
         "volume": (playback.sink.volume() * 100.0).round(),
         "isShuffleActive": playback.shuffle,
         "loopState": playback.repeat.as_str(),
-        "currentTime": playback.sink.get_pos().as_secs_f64(),
+        "currentTime": (playback.position_offset + playback.sink.get_pos()).as_secs_f64(),
         "duration": playback.duration,
     }));
 }
@@ -279,8 +304,8 @@ fn default_local_music_folder() -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
-fn get_local_music_library(app: AppHandle) -> Vec<LocalMusicFolder> {
-    let Some(root) = default_local_music_folder().or_else(|| saved_local_music_folder(&app)) else {
+fn get_local_music_library(_app: AppHandle) -> Vec<LocalMusicFolder> {
+    let Some(root) = default_local_music_folder() else {
         return Vec::new();
     };
 
@@ -886,7 +911,9 @@ fn control_player(
                 .sender
                 .send(LocalAudioCommand::CycleRepeat)
                 .map_err(|_| "Native audio thread is unavailable".to_string())?,
-            "seek" => {}
+            // Seeking local files is intentionally disabled: some formats
+            // require decoding from the start, which makes far seeks stall.
+            "seek" => return Ok(()),
             _ => return Err(format!("Unknown action: {}", action)),
         }
         return Ok(());
@@ -1122,22 +1149,24 @@ fn toggle_expand_view(
             .center()
             .map_err(|e| format!("Failed to center expanded window: {e}"))?;
 
+        if !show_player.unwrap_or(true) {
+            if let Some(webview) = app.get_webview("yt-player") {
+                webview
+                    .set_position(PhysicalPosition::new(
+                        (949.0 * scale_factor).round() as i32,
+                        (699.0 * scale_factor).round() as i32,
+                    ))
+                    .map_err(|e| format!("Failed to park player: {e}"))?;
+                webview
+                    .set_size(PhysicalSize::new(1, 1))
+                    .map_err(|e| format!("Failed to resize parked player: {e}"))?;
+            }
+            return Ok(());
+        }
+
         let webview = app
             .get_webview("yt-player")
             .ok_or_else(|| "Player webview not found".to_string())?;
-
-        if !show_player.unwrap_or(true) {
-            webview
-                .set_position(PhysicalPosition::new(
-                    (949.0 * scale_factor).round() as i32,
-                    (699.0 * scale_factor).round() as i32,
-                ))
-                .map_err(|e| format!("Failed to park player: {e}"))?;
-            webview
-                .set_size(PhysicalSize::new(1, 1))
-                .map_err(|e| format!("Failed to resize parked player: {e}"))?;
-            return Ok(());
-        }
 
         // Đặt webview chiếm khu vực bên dưới thanh điều khiển
         // logical x=10, y=130, width=930, height=560

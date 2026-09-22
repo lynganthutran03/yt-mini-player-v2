@@ -64,6 +64,7 @@ export const App: React.FC = () => {
   const loadingStartedAtRef = useRef<number | undefined>(undefined);
   const platformRef = useRef(platform);
   const localVolumeRef = useRef(initialLocalVolume);
+  const isSeekingRef = useRef(false);
 
   // Trạng thái giao diện
   const [isExpanded, setIsExpanded] = useState(false);
@@ -123,7 +124,7 @@ export const App: React.FC = () => {
       } catch {
         setLoopMode(data.loopState || 'none');
       }
-      if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
+      if (typeof data.currentTime === 'number' && !isSeekingRef.current) setCurrentTime(data.currentTime);
       if (typeof data.duration === 'number') setDuration(data.duration);
       if (typeof data.volume === 'number') {
         if (data.source === 'local') {
@@ -229,20 +230,31 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleSeekPreview = (value: number) => {
+    if (platform === 'local') return;
+    isSeekingRef.current = true;
+    setCurrentTime(value);
+  };
+
+  const handleSeekCommit = (value: number) => {
+    if (platform === 'local') return;
+    isSeekingRef.current = false;
+    setCurrentTime(value);
+    handleControl('seek', value);
+  };
+
   // Chuyển nền tảng
   const handleSwitchPlatform = async (newPlatform: string) => {
     if (newPlatform === 'local') {
       try {
         const folders = await invoke<LocalMusicFolder[]>('get_local_music_library');
-        if (!folders.length) {
-          setPlayerLoadState('failed');
-          return;
-        }
         // A WebView2 child surface can remain above React for one compositor
         // frame when it is already expanded. Park only that child surface;
         // the main window stays expanded throughout the switch.
         if (isExpanded) {
-          await invoke('park_player_webview');
+          await invoke('park_player_webview').catch((error) => {
+            console.warn('Could not park player before Local Music:', error);
+          });
           await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
         }
         await invoke('switch_platform', { platform: newPlatform });
@@ -265,10 +277,6 @@ export const App: React.FC = () => {
     setPlatform(newPlatform);
     beginPlayerLoading();
     if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
-    loadTimeoutRef.current = window.setTimeout(() => {
-      finishPlayerLoading('failed');
-      loadTimeoutRef.current = undefined;
-    }, 20_000);
     try {
       await invoke('switch_platform', { platform: newPlatform });
       if (isExpanded) {
@@ -687,10 +695,19 @@ export const App: React.FC = () => {
               max={duration || 100}
               value={currentTime}
               step="any"
+              disabled={platform === 'local'}
+              title={platform === 'local' ? t('local.seekDisabled') : undefined}
+              aria-label={platform === 'local' ? t('local.seekDisabled') : undefined}
               onChange={(e) => {
                 const val = parseFloat(e.target.value);
-                setCurrentTime(val);
-                handleControl('seek', val);
+                handleSeekPreview(val);
+              }}
+              onPointerUp={(e) => handleSeekCommit(parseFloat((e.currentTarget as HTMLInputElement).value))}
+              onPointerCancel={(e) => handleSeekCommit(parseFloat((e.currentTarget as HTMLInputElement).value))}
+              onKeyUp={(e) => {
+                if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) {
+                  handleSeekCommit(parseFloat((e.currentTarget as HTMLInputElement).value));
+                }
               }}
               style={{
                 background: `linear-gradient(to right, ${accentColor} ${progressPercent}%, rgba(255, 255, 255, 0.2) ${progressPercent}%)`
@@ -842,7 +859,12 @@ export const App: React.FC = () => {
             {selectedLocalFolder === 'all' && <span>{t('local.folder')}</span>}
           </div>
           <div className="local-track-list">
-            {!selectedLocalFolder && <div className="local-library-empty">{t('local.chooseFolder')}</div>}
+            {!localFolders.length && (
+              <div className="local-library-empty">
+                {t('local.noMusicFolders')}
+              </div>
+            )}
+            {localFolders.length > 0 && !selectedLocalFolder && <div className="local-library-empty">{t('local.chooseFolder')}</div>}
             {localTracks.map((track, index) => (
               <button className={`local-track-row ${selectedLocalFolder === 'all' ? 'show-folder' : ''}`} key={track} title={track} onClick={() => handlePlayLocalTrack(index)}>
                 <span>{index + 1}</span>
