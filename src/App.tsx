@@ -3,6 +3,7 @@ import { currentMonitor, getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalPosition, LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useTranslation } from 'react-i18next';
 
 interface YTMusicData {
   title: string;
@@ -16,6 +17,7 @@ interface YTMusicData {
   currentTime: number;
   duration: number;
   repeatDebug?: string;
+  source?: 'local';
 }
 
 interface PlayerFullscreenData {
@@ -26,9 +28,17 @@ interface PlayerLoadData {
   status: 'loading' | 'ready' | 'failed';
 }
 
+interface LocalMusicFolder {
+  name: string;
+  paths: string[];
+}
+
 export const App: React.FC = () => {
+  const { t, i18n } = useTranslation();
+  const savedLocalVolume = Number(localStorage.getItem('yt-mini-local-volume'));
+  const initialLocalVolume = Number.isFinite(savedLocalVolume) ? Math.max(0, Math.min(100, savedLocalVolume)) : 100;
   // Trạng thái bài hát thực tế nhận từ Webview
-  const [title, setTitle] = useState('Đang kết nối YouTube Music...');
+  const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('YouTube Music');
   const [album, setAlbum] = useState('');
   const [thumb, setThumb] = useState('');
@@ -40,7 +50,14 @@ export const App: React.FC = () => {
   const [volume, setVolume] = useState(100);
   const [platform, setPlatform] = useState('youtube-music');
   const [playerLoadState, setPlayerLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [localTracks, setLocalTracks] = useState<string[]>([]);
+  const [localQueue, setLocalQueue] = useState<string[]>([]);
+  const [localFolders, setLocalFolders] = useState<LocalMusicFolder[]>([]);
+  const [selectedLocalFolder, setSelectedLocalFolder] = useState<string | 'all' | null>(null);
+  const [autoNextFolder, setAutoNextFolder] = useState(false);
   const loadTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | undefined>(undefined);
+  const platformRef = useRef(platform);
+  const localVolumeRef = useRef(initialLocalVolume);
 
   // Trạng thái giao diện
   const [isExpanded, setIsExpanded] = useState(false);
@@ -53,9 +70,13 @@ export const App: React.FC = () => {
 
   const themes = ['theme-dark-glass', 'theme-light-glass', 'theme-dark-solid', 'theme-light-solid'];
   const youtubePlaylistControlsUnavailable = platform === 'youtube';
-  const localPlaylistControlsUnavailable = platform === 'local';
-  const platformLabel = platform === 'youtube-music' ? 'YouTube Music' : platform === 'youtube' ? 'YouTube' : platform === 'soundcloud' ? 'SoundCloud' : 'Nhạc trên máy';
+  const platformLabel = platform === 'youtube-music' ? 'YouTube Music' : platform === 'youtube' ? 'YouTube' : platform === 'soundcloud' ? 'SoundCloud' : t('platform.local');
   const showBrowserLoading = isExpanded && playerLoadState === 'loading';
+  const loadingTitle = t('player.opening', { platform: platformLabel });
+
+  useEffect(() => {
+    platformRef.current = platform;
+  }, [platform]);
 
   // Khởi tạo child webview YouTube Music và lắng nghe sự kiện scraper
   useEffect(() => {
@@ -65,6 +86,8 @@ export const App: React.FC = () => {
 
     const unlistenDataPromise = listen<YTMusicData>('yt-music-data', (event) => {
       const data = event.payload;
+      if (platformRef.current === 'local' && data.source !== 'local') return;
+      if (platformRef.current !== 'local' && data.source === 'local') return;
       if (data.title) setTitle(data.title);
       if (data.artist) setArtist(data.artist);
       setAlbum(data.album ? ` • ${data.album}` : '');
@@ -82,7 +105,13 @@ export const App: React.FC = () => {
       }
       if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
       if (typeof data.duration === 'number') setDuration(data.duration);
-      if (typeof data.volume === 'number') setVolume(data.volume);
+      if (typeof data.volume === 'number') {
+        if (data.source === 'local') {
+          localVolumeRef.current = data.volume;
+          localStorage.setItem('yt-mini-local-volume', String(data.volume));
+        }
+        setVolume(data.volume);
+      }
       // A valid metadata event is the most reliable signal that a SPA player is
       // actually usable, even if the browser's document-finished event was missed.
       setPlayerLoadState('ready');
@@ -102,11 +131,18 @@ export const App: React.FC = () => {
       setTitle('Không thể phát file nhạc');
       setArtist(event.payload);
     });
+    // The child WebView can finish its initial navigation before React has
+    // attached its event listener. Do not leave the mini UI in loading state
+    // in that race; later navigation events still drive the normal status.
+    const initialReadyTimeout = window.setTimeout(() => {
+      setPlayerLoadState((current) => current === 'loading' ? 'ready' : current);
+    }, 1_500);
     return () => {
       unlistenDataPromise.then((unlisten) => unlisten());
       unlistenFullscreenPromise.then((unlisten) => unlisten());
       unlistenLoadPromise.then((unlisten) => unlisten());
       unlistenLocalAudioErrorPromise.then((unlisten) => unlisten());
+      window.clearTimeout(initialReadyTimeout);
       if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
     };
   }, []);
@@ -149,7 +185,12 @@ export const App: React.FC = () => {
     try {
       await invoke('control_player', { action, value });
       if (platform === 'local' && action === 'play-pause') setIsPlaying((current) => !current);
-      if (platform === 'local' && action === 'volume' && typeof value === 'number') setVolume(Math.round(value * 100));
+      if (platform === 'local' && action === 'volume' && typeof value === 'number') {
+        const nextVolume = Math.round(value * 100);
+        localVolumeRef.current = nextVolume;
+        localStorage.setItem('yt-mini-local-volume', String(nextVolume));
+        setVolume(nextVolume);
+      }
     } catch (err) {
       console.warn('control_player error:', err);
     }
@@ -158,16 +199,28 @@ export const App: React.FC = () => {
   // Chuyển nền tảng
   const handleSwitchPlatform = async (newPlatform: string) => {
     if (newPlatform === 'local') {
-      const path = await invoke<string | null>('pick_local_music_file');
-      if (!path) return;
-      if (isExpanded) {
-        await invoke('toggle_expand_view', { isExpanded: false });
-        setIsExpanded(false);
-      }
-      setPlatform(newPlatform);
       try {
+        const folders = await invoke<LocalMusicFolder[]>('get_local_music_library');
+        if (!folders.length) {
+          setPlayerLoadState('failed');
+          return;
+        }
+        // A WebView2 child surface can remain above React for one compositor
+        // frame when it is already expanded. Park only that child surface;
+        // the main window stays expanded throughout the switch.
+        if (isExpanded) {
+          await invoke('park_player_webview');
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+        }
         await invoke('switch_platform', { platform: newPlatform });
-        await invoke('play_local_file', { path });
+        await invoke('toggle_expand_view', { isExpanded: true, showPlayer: false });
+        setPlatform(newPlatform);
+        setVolume(localVolumeRef.current);
+        setIsExpanded(true);
+        setLocalFolders(folders);
+        setLocalTracks([]);
+        setLocalQueue([]);
+        setSelectedLocalFolder(null);
         setPlayerLoadState('ready');
       } catch (err) {
         setPlayerLoadState('failed');
@@ -185,6 +238,9 @@ export const App: React.FC = () => {
     }, 20_000);
     try {
       await invoke('switch_platform', { platform: newPlatform });
+      if (isExpanded) {
+        await invoke('toggle_expand_view', { isExpanded: true, showPlayer: true });
+      }
     } catch (err) {
       setPlayerLoadState('failed');
       console.warn('switch_platform error:', err);
@@ -192,11 +248,69 @@ export const App: React.FC = () => {
   };
 
   // Mở rộng / thu nhỏ giao diện webview
+  const handleSelectLocalFolder = async (folder: LocalMusicFolder | 'all') => {
+    const allTracks = localFolders.flatMap((item) => item.paths);
+    const isAllTracks = folder === 'all';
+    const tracks = isAllTracks ? allTracks : folder.paths;
+    if (!tracks.length) return;
+    const folderIndex = isAllTracks ? -1 : localFolders.findIndex((item) => item.name === folder.name);
+    const queue = !isAllTracks && autoNextFolder
+      ? localFolders.slice(folderIndex).flatMap((item) => item.paths)
+      : tracks;
+    setSelectedLocalFolder(isAllTracks ? 'all' : folder.name);
+    setLocalTracks(tracks);
+    setLocalQueue(queue);
+  };
+
+  const handlePlayCurrentLocalFolder = async (paths?: string[]) => {
+    const queue = paths || (localQueue.length ? localQueue : localTracks);
+    if (!queue.length) return;
+    try {
+      await invoke('play_local_folder', { paths: queue, volume: localVolumeRef.current / 100 });
+      setIsPlaying(true);
+      setPlayerLoadState('ready');
+    } catch (err) {
+      console.warn('play_local_folder error:', err);
+    }
+  };
+
+  const handleRefreshLocalLibrary = async () => {
+    try {
+      const folders = await invoke<LocalMusicFolder[]>('get_local_music_library');
+      setLocalFolders(folders);
+      if (!selectedLocalFolder) return;
+
+      const allTracks = folders.flatMap((folder) => folder.paths);
+      const activeFolder = selectedLocalFolder === 'all'
+        ? null
+        : folders.find((folder) => folder.name === selectedLocalFolder);
+      const tracks = selectedLocalFolder === 'all' ? allTracks : activeFolder?.paths;
+      if (!tracks?.length) {
+        setSelectedLocalFolder(null);
+        setLocalTracks([]);
+        setLocalQueue([]);
+        return;
+      }
+
+      const activeIndex = activeFolder ? folders.findIndex((folder) => folder.name === activeFolder.name) : -1;
+      setLocalTracks(tracks);
+      setLocalQueue(autoNextFolder && activeIndex >= 0
+        ? folders.slice(activeIndex).flatMap((folder) => folder.paths)
+        : tracks);
+    } catch (err) {
+      console.warn('local_music library refresh error:', err);
+    }
+  };
+
+  const getLocalTrackFolder = (track: string) => (
+    localFolders.find((folder) => folder.paths.includes(track))?.name || 'Nhạc chưa phân loại'
+  );
+
   const handleToggleExpand = async () => {
     const nextState = !isExpanded;
     setIsExpanded(nextState);
     try {
-      await invoke('toggle_expand_view', { isExpanded: nextState });
+      await invoke('toggle_expand_view', { isExpanded: nextState, showPlayer: platform !== 'local' });
     } catch (err) {
       if (nextState && String(err).includes('Player webview not found')) {
         window.setTimeout(() => {
@@ -206,6 +320,16 @@ export const App: React.FC = () => {
       } else {
         console.error('Native expand failed:', err);
       }
+    }
+  };
+
+  const handlePlayLocalTrack = async (startIndex: number) => {
+    try {
+      await invoke('play_local_folder', { paths: localQueue.length ? localQueue : localTracks, startIndex, volume: localVolumeRef.current / 100 });
+      setIsPlaying(true);
+      setPlayerLoadState('ready');
+    } catch (err) {
+      console.warn('play_local_track error:', err);
     }
   };
 
@@ -228,7 +352,7 @@ export const App: React.FC = () => {
 
     document.addEventListener('pointerdown', onPointerDownCapture, true);
     return () => document.removeEventListener('pointerdown', onPointerDownCapture, true);
-  }, [isExpanded]);
+  }, [isExpanded, platform]);
 
   // Snap cửa sổ vào các cạnh/góc của màn hình khi được kéo tới gần.
   useEffect(() => {
@@ -422,7 +546,7 @@ export const App: React.FC = () => {
 
     setIsSettingsOpen(open);
     try {
-      await invoke('resize_modal', { isOpen: open, height: open ? 200 : 130 });
+      await invoke('resize_modal', { isOpen: open, height: open ? 270 : 130 });
     } catch (err) {
       console.warn('resize_modal error:', err);
     }
@@ -503,17 +627,17 @@ export const App: React.FC = () => {
           </div>
 
           <div className="song-info">
-            <div id="title" className="title player-title" title={playerLoadState === 'loading' && !showBrowserLoading ? `Đang mở ${platformLabel}…` : title}>
-              {playerLoadState === 'loading' && !showBrowserLoading && <span className="mini-load-spinner" aria-label="Đang tải" />}
-              <span>{playerLoadState === 'loading' && !showBrowserLoading ? `Đang mở ${platformLabel}…` : title}</span>
+            <div id="title" className="title player-title" title={playerLoadState === 'loading' ? loadingTitle : title}>
+              {playerLoadState === 'loading' && !showBrowserLoading && <span className="mini-load-spinner" aria-label={t('player.loading', { platform: platformLabel })} />}
+              <span>{playerLoadState === 'loading' ? loadingTitle : title}</span>
             </div>
             <div className="artist">
-              <span id="artist">{playerLoadState === 'loading' && !showBrowserLoading ? 'Đang tải web player' : playerLoadState === 'failed' ? 'Không thể tải trang' : artist}</span>
+              <span id="artist">{playerLoadState === 'loading' ? t('player.loadingWeb') : playerLoadState === 'failed' ? t('player.failed') : artist}</span>
               <span id="album">{album}</span>
             </div>
           </div>
 
-          <button id="close-app" title="Tắt Mini Player">
+            <button id="close-app" title={t('player.close')}>
             <i className="fa-solid fa-xmark"></i>
           </button>
         </div>
@@ -547,31 +671,31 @@ export const App: React.FC = () => {
           <div className="playback-controls">
             <button
               id="shuffle"
-              title={localPlaylistControlsUnavailable ? 'Nhạc trên máy MVP hiện phát một bài một lần' : youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ trộn trong playlist/queue' : 'Trộn bài'}
-              className={`${isShuffle ? 'active' : ''} ${(youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable) ? 'unavailable' : ''}`.trim()}
-              disabled={youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable}
+              title={youtubePlaylistControlsUnavailable ? t('player.shuffleUnavailable') : t('player.shuffle')}
+              className={`${isShuffle ? 'active' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable}
               onClick={() => handleControl('shuffle')}
             >
               <i className="fa-solid fa-shuffle"></i>
             </button>
-            <button id="prev" title="Bài trước" onClick={() => handleControl('prev')}>
+            <button id="prev" title={t('player.previous')} onClick={() => handleControl('prev')}>
               <i className="fa-solid fa-backward-step"></i>
             </button>
             <button
               id="play-pause"
-              title="Phát/Dừng"
+              title={t('player.playPause')}
               onClick={() => handleControl('play-pause')}
             >
               <i className={isPlaying ? 'fa-solid fa-pause' : 'fa-solid fa-play'}></i>
             </button>
-            <button id="next" title="Bài tiếp" onClick={() => handleControl('next')}>
+            <button id="next" title={t('player.next')} onClick={() => handleControl('next')}>
               <i className="fa-solid fa-forward-step"></i>
             </button>
             <button
               id="loop"
-              title={localPlaylistControlsUnavailable ? 'Nhạc trên máy MVP hiện phát một bài một lần' : youtubePlaylistControlsUnavailable ? 'YouTube chỉ hỗ trợ lặp trong playlist/queue' : 'Lặp lại'}
-              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''} ${(youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable) ? 'unavailable' : ''}`.trim()}
-              disabled={youtubePlaylistControlsUnavailable || localPlaylistControlsUnavailable}
+              title={youtubePlaylistControlsUnavailable ? t('player.repeatUnavailable') : t('player.repeat')}
+              className={`${loopMode !== 'none' ? 'active' : ''} ${loopMode === 'one' ? 'repeat-one' : ''} ${youtubePlaylistControlsUnavailable ? 'unavailable' : ''}`.trim()}
+              disabled={youtubePlaylistControlsUnavailable}
               onClick={() => handleControl('loop')}
             >
               <i className="fa-solid fa-repeat"></i>
@@ -580,7 +704,7 @@ export const App: React.FC = () => {
           </div>
 
           <div className="utility-controls">
-            <div className="volume-container" title="Âm lượng">
+            <div className="volume-container" title={t('player.volume')}>
               <i
                 className={volume === 0 ? 'fa-solid fa-volume-xmark' : 'fa-solid fa-volume-high'}
                 style={{ fontSize: '12px', marginRight: '4px', cursor: 'pointer' }}
@@ -603,7 +727,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className="platform-selector-wrapper" title="Chọn nền tảng">
+            <div className="platform-selector-wrapper" title={t('player.choosePlatform')}>
               {platform === 'youtube-music' ? (
                 <span id="platform-icon" className="platform-brand platform-brand-music" aria-label="YouTube Music">
                   <span className="youtube-music-play"></span>
@@ -624,18 +748,18 @@ export const App: React.FC = () => {
                 <option value="youtube-music">YouTube Music</option>
                 <option value="youtube">YouTube</option>
                 <option value="soundcloud">SoundCloud</option>
-                <option value="local">Nhạc trên máy (MVP)</option>
+                <option value="local">{t('platform.local')}</option>
               </select>
             </div>
 
             <button
               id="settings-menu-btn"
-              title="Cài đặt"
+              title={t('common.settings')}
               onClick={() => handleToggleSettings(true)}
             >
               <i className="fa-solid fa-ellipsis-vertical"></i>
             </button>
-            <button id="toggle-web" title={isExpanded ? 'Thu nhỏ giao diện' : 'Mở rộng giao diện'} disabled={isSettingsOpen}>
+            <button id="toggle-web" title={isExpanded ? t('player.collapse') : t('player.expand')} disabled={isSettingsOpen}>
               <i className={isExpanded ? 'fa-solid fa-xmark' : 'fa-solid fa-expand'}></i>
             </button>
           </div>
@@ -646,10 +770,64 @@ export const App: React.FC = () => {
       {showBrowserLoading && (
         <div className="browser-loading-strip" role="status">
           <span className="mini-load-spinner" aria-hidden="true" />
-          <span>Đang tải {platformLabel}…</span>
+          <span>{t('player.loading', { platform: platformLabel })}</span>
         </div>
       )}
-      <div id="yt-view" className={isExpanded ? 'expanded' : ''}></div>
+      {platform === 'local' && isExpanded ? (
+        <div id="local-library" className="expanded">
+          <div className="local-library-header">
+            <span><i className="fa-solid fa-folder-music"></i> {t('local.library')}</span>
+            <span>{t('local.tracks', { count: localTracks.length })}</span>
+            <button className="local-library-refresh" title={t('local.refresh')} onClick={handleRefreshLocalLibrary}>
+              <i className="fa-solid fa-rotate" />
+            </button>
+          </div>
+          <div className="local-explorer">
+            <aside className="local-folder-pane" aria-label="Music folders">
+            <button className={`local-folder-chip ${selectedLocalFolder === 'all' ? 'active' : ''}`} onClick={() => handleSelectLocalFolder('all')} onDoubleClick={() => handlePlayCurrentLocalFolder(localFolders.flatMap((folder) => folder.paths))}>
+              <i className="fa-solid fa-music" /> {t('local.allMusic')} <small>{localFolders.reduce((count, folder) => count + folder.paths.length, 0)}</small>
+            </button>
+            {localFolders.map((folder) => (
+              <button className={`local-folder-chip ${selectedLocalFolder === folder.name ? 'active' : ''}`} key={folder.name} onClick={() => handleSelectLocalFolder(folder)} onDoubleClick={() => {
+                const folderIndex = localFolders.findIndex((item) => item.name === folder.name);
+                handlePlayCurrentLocalFolder(autoNextFolder ? localFolders.slice(folderIndex).flatMap((item) => item.paths) : folder.paths);
+              }}>
+                <i className="fa-solid fa-folder" /> {folder.name} <small>{folder.paths.length}</small>
+              </button>
+            ))}
+            </aside>
+            <main className="local-file-pane">
+          <div className="local-library-toolbar">
+          <button className="local-play-folder" disabled={!selectedLocalFolder} onClick={() => handlePlayCurrentLocalFolder()}>
+            <i className="fa-solid fa-play" /> {t('local.playFolder')}
+          </button>
+          <label className="local-auto-next">
+            <input type="checkbox" checked={autoNextFolder} onChange={(event) => setAutoNextFolder(event.target.checked)} />
+            <span className="local-toggle-switch" aria-hidden="true" />
+            <span>{t('local.playNextFolder')}</span>
+          </label>
+          </div>
+          <div className={`local-file-header ${selectedLocalFolder === 'all' ? 'show-folder' : ''}`}>
+            <span />
+            <span>{t('local.name')}</span>
+            <span>{t('local.type')}</span>
+            {selectedLocalFolder === 'all' && <span>{t('local.folder')}</span>}
+          </div>
+          <div className="local-track-list">
+            {!selectedLocalFolder && <div className="local-library-empty">{t('local.chooseFolder')}</div>}
+            {localTracks.map((track, index) => (
+              <button className={`local-track-row ${selectedLocalFolder === 'all' ? 'show-folder' : ''}`} key={track} title={track} onClick={() => handlePlayLocalTrack(index)}>
+                <span>{index + 1}</span>
+                <span>{track.split(/[/\\]/).pop()}</span>
+                <span className="local-track-type">{track.split('.').pop()?.toUpperCase()}</span>
+                {selectedLocalFolder === 'all' && <span className="local-track-folder">{getLocalTrackFolder(track)}</span>}
+              </button>
+            ))}
+          </div>
+            </main>
+          </div>
+        </div>
+      ) : <div id="yt-view" className={isExpanded ? 'expanded' : ''}></div>}
 
       {/* Modal Cài đặt chuẩn V1 */}
       {isSettingsOpen && (
@@ -657,20 +835,35 @@ export const App: React.FC = () => {
           <div className="settings-modal-content">
             <div className="settings-header">
               <h3>
-                <i className="fa-solid fa-sliders" style={{ color: accentColor }}></i> Tùy chỉnh
+                <i className="fa-solid fa-sliders" style={{ color: accentColor }}></i> {t('common.settings')}
               </h3>
-              <button id="close-settings" title="Đóng cài đặt" onClick={() => handleToggleSettings(false)}>
+              <button id="close-settings" title={t('common.close')} onClick={() => handleToggleSettings(false)}>
                 <i className="fa-solid fa-xmark"></i>
               </button>
             </div>
 
             <div className="settings-grid">
+              <div className="menu-item language-setting">
+                <span><i className="fa-solid fa-language"></i> {t('common.language')}</span>
+                <select
+                  className="language-select"
+                  value={i18n.resolvedLanguage || 'vi'}
+                  onChange={(event) => {
+                    const language = event.target.value;
+                    i18n.changeLanguage(language);
+                    localStorage.setItem('yt-mini-language', language);
+                  }}
+                >
+                  <option value="vi">{t('common.vietnamese')}</option>
+                  <option value="en">{t('common.english')}</option>
+                </select>
+              </div>
               <button id="toggle-theme" className="menu-item" onClick={handleToggleTheme}>
-                <i className="fa-solid fa-palette"></i> Đổi giao diện
+                <i className="fa-solid fa-palette"></i> {t('settings.changeTheme')}
               </button>
 
               <label className="color-picker-btn menu-item">
-                <i className="fa-solid fa-droplet"></i> Đổi màu nhấn
+                <i className="fa-solid fa-droplet"></i> {t('settings.changeAccent')}
                 <input
                   type="color"
                   id="accent-color-picker"
@@ -681,7 +874,7 @@ export const App: React.FC = () => {
 
               <div className="menu-item" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <i className="fa-solid fa-compact-disc"></i> Đĩa than xoay
+                  <i className="fa-solid fa-compact-disc"></i> {t('settings.spinningVinyl')}
                 </span>
                 <label className="switch">
                   <input
@@ -698,7 +891,7 @@ export const App: React.FC = () => {
 
               <div className="menu-item" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <i className="fa-solid fa-thumbtack"></i> Ghim cửa sổ
+                  <i className="fa-solid fa-thumbtack"></i> {t('settings.alwaysOnTop')}
                 </span>
                 <label className="switch">
                   <input

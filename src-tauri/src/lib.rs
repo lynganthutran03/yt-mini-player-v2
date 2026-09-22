@@ -4,6 +4,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::{fs::File, io::BufReader};
+use std::time::{Duration, Instant};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewBuilder, WebviewUrl,
@@ -22,86 +23,172 @@ struct WindowGeometry {
 struct WindowRestoreState(Mutex<Option<WindowGeometry>>);
 
 enum LocalAudioCommand {
-    Play { path: String, app: AppHandle },
+    PlayQueue { paths: Vec<String>, start_index: usize, app: AppHandle },
     TogglePause,
     SetVolume(f32),
+    Next,
+    Previous,
+    ToggleShuffle,
+    CycleRepeat,
     Stop,
 }
 
 struct LocalAudioState {
     sender: Sender<LocalAudioCommand>,
     is_active: AtomicBool,
+    volume_bits: Arc<std::sync::atomic::AtomicU32>,
+}
+
+struct ActiveLocalPlayback {
+    _stream: OutputStream,
+    sink: Sink,
+    queue: Vec<String>,
+    index: usize,
+    app: AppHandle,
+    title: String,
+    duration: f64,
+    shuffle: bool,
+    repeat: LocalRepeatMode,
+    last_progress_emit: Instant,
+}
+
+#[derive(Serialize)]
+struct LocalMusicFolder {
+    name: String,
+    paths: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum LocalRepeatMode { None, All, One }
+
+impl LocalRepeatMode {
+    fn next(self) -> Self { match self { Self::None => Self::All, Self::All => Self::One, Self::One => Self::None } }
+    fn as_str(self) -> &'static str { match self { Self::None => "none", Self::All => "all", Self::One => "one" } }
+}
+
+fn create_local_playback(queue: Vec<String>, index: usize, app: AppHandle, volume: f32, shuffle: bool, repeat: LocalRepeatMode) -> Result<ActiveLocalPlayback, String> {
+    let path = queue.get(index).ok_or_else(|| "Không còn bài trong hàng đợi".to_string())?;
+    let file = File::open(path).map_err(|error| format!("Không thể mở file nhạc: {error}"))?;
+    let source = Decoder::new(BufReader::new(file))
+        .map_err(|error| format!("File nhạc không được hỗ trợ: {error}"))?;
+    let duration = source.total_duration().map(|value| value.as_secs_f64()).unwrap_or(0.0);
+    let (stream, stream_handle) = OutputStream::try_default()
+        .map_err(|error| format!("Không thể khởi tạo audio output: {error}"))?;
+    let sink = Sink::try_new(&stream_handle)
+        .map_err(|error| format!("Không thể tạo audio player: {error}"))?;
+    sink.append(source);
+    sink.set_volume(volume);
+    sink.play();
+    let title = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Nhạc trên máy")
+        .to_string();
+    Ok(ActiveLocalPlayback { _stream: stream, sink, queue, index, app, title, duration, shuffle, repeat, last_progress_emit: Instant::now() - Duration::from_secs(1) })
+}
+
+fn emit_local_playback(playback: &ActiveLocalPlayback) {
+    let _ = playback.app.emit("yt-music-data", serde_json::json!({
+        "source": "local",
+        "title": playback.title,
+        "artist": "Nhạc trên máy",
+        "album": "",
+        "thumb": "",
+        "isPlaying": !playback.sink.is_paused() && !playback.sink.empty(),
+        "volume": (playback.sink.volume() * 100.0).round(),
+        "isShuffleActive": playback.shuffle,
+        "loopState": playback.repeat.as_str(),
+        "currentTime": playback.sink.get_pos().as_secs_f64(),
+        "duration": playback.duration,
+    }));
 }
 
 impl LocalAudioState {
     fn new() -> Self {
         let (sender, receiver) = mpsc::channel::<LocalAudioCommand>();
+        let volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits()));
+        let worker_volume_bits = volume_bits.clone();
         std::thread::spawn(move || {
-            // Rodio's Windows stream is intentionally !Send. Keeping it on one
-            // dedicated thread is required by CPAL and keeps Tauri state safe.
-            let mut stream: Option<OutputStream> = None;
-            let mut sink: Option<Sink> = None;
-            while let Ok(command) = receiver.recv() {
-                match command {
-                    LocalAudioCommand::Play { path, app } => {
-                        let result = (|| -> Result<(OutputStream, Sink, String, f64), String> {
-                            let file = File::open(&path)
-                                .map_err(|error| format!("Không thể mở file nhạc: {error}"))?;
-                            let source = Decoder::new(BufReader::new(file))
-                                .map_err(|error| format!("File nhạc không được hỗ trợ: {error}"))?;
-                            let duration = source.total_duration().map(|value| value.as_secs_f64()).unwrap_or(0.0);
-                            let (output_stream, stream_handle) = OutputStream::try_default()
-                                .map_err(|error| format!("Không thể khởi tạo audio output: {error}"))?;
-                            let next_sink = Sink::try_new(&stream_handle)
-                                .map_err(|error| format!("Không thể tạo audio player: {error}"))?;
-                            next_sink.append(source);
-                            next_sink.play();
-                            let title = std::path::Path::new(&path)
-                                .file_stem()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("Nhạc trên máy")
-                                .to_string();
-                            Ok((output_stream, next_sink, title, duration))
-                        })();
-
-                        match result {
-                            Ok((next_stream, next_sink, title, duration)) => {
-                                sink = Some(next_sink);
-                                stream = Some(next_stream);
-                                let _ = app.emit("yt-music-data", serde_json::json!({
-                                    "title": title,
-                                    "artist": "Nhạc trên máy",
-                                    "album": "",
-                                    "thumb": "",
-                                    "isPlaying": true,
-                                    "volume": 100,
-                                    "isShuffleActive": false,
-                                    "loopState": "none",
-                                    "currentTime": 0.0,
-                                    "duration": duration,
-                                }));
-                            }
-                            Err(error) => {
-                                let _ = app.emit("local-audio-error", error);
-                            }
+            let mut playback: Option<ActiveLocalPlayback> = None;
+            let mut shuffle_enabled = false;
+            let mut repeat_mode = LocalRepeatMode::None;
+            loop {
+                match receiver.recv_timeout(Duration::from_millis(250)) {
+                    Ok(LocalAudioCommand::PlayQueue { mut paths, start_index, app }) => {
+                        if shuffle_enabled { shuffle_paths(&mut paths); }
+                        let index = start_index.min(paths.len().saturating_sub(1));
+                        match create_local_playback(paths, index, app.clone(), f32::from_bits(worker_volume_bits.load(Ordering::SeqCst)), shuffle_enabled, repeat_mode) {
+                        Ok(next) => playback = Some(next),
+                        Err(error) => { let _ = app.emit("local-audio-error", error); }
+                    }},
+                    Ok(LocalAudioCommand::TogglePause) => if let Some(current) = playback.as_ref() {
+                        if current.sink.is_paused() { current.sink.play(); } else { current.sink.pause(); }
+                    },
+                    Ok(LocalAudioCommand::SetVolume(volume)) => if let Some(current) = playback.as_ref() { current.sink.set_volume(volume); },
+                    Ok(LocalAudioCommand::Next) => {
+                        let next = playback.as_ref().and_then(|current| {
+                            let target = (current.index + 1).min(current.queue.len().saturating_sub(1));
+                            (target != current.index).then(|| (current.queue.clone(), target, current.app.clone()))
+                        });
+                        if let Some((queue, target, app)) = next {
+                            playback = create_local_playback(queue, target, app, f32::from_bits(worker_volume_bits.load(Ordering::SeqCst)), shuffle_enabled, repeat_mode).ok();
                         }
                     }
-                    LocalAudioCommand::TogglePause => {
-                        if let Some(current_sink) = sink.as_ref() {
-                            if current_sink.is_paused() { current_sink.play(); } else { current_sink.pause(); }
+                    Ok(LocalAudioCommand::Previous) => {
+                        let previous = playback.as_ref().and_then(|current| {
+                            let target = current.index.saturating_sub(1);
+                            (target != current.index).then(|| (current.queue.clone(), target, current.app.clone()))
+                        });
+                        if let Some((queue, target, app)) = previous {
+                            playback = create_local_playback(queue, target, app, f32::from_bits(worker_volume_bits.load(Ordering::SeqCst)), shuffle_enabled, repeat_mode).ok();
                         }
                     }
-                    LocalAudioCommand::SetVolume(volume) => {
-                        if let Some(current_sink) = sink.as_ref() { current_sink.set_volume(volume); }
+                    Ok(LocalAudioCommand::ToggleShuffle) => {
+                        shuffle_enabled = !shuffle_enabled;
+                        if let Some(current) = playback.as_mut() {
+                            let active_path = current.queue[current.index].clone();
+                            if shuffle_enabled { shuffle_paths(&mut current.queue); } else { current.queue.sort_unstable(); }
+                            current.index = current.queue.iter().position(|path| path == &active_path).unwrap_or(0);
+                            current.shuffle = shuffle_enabled;
+                            emit_local_playback(current);
+                        }
                     }
-                    LocalAudioCommand::Stop => {
-                        sink.take();
-                        stream.take();
+                    Ok(LocalAudioCommand::CycleRepeat) => {
+                        repeat_mode = repeat_mode.next();
+                        if let Some(current) = playback.as_mut() { current.repeat = repeat_mode; emit_local_playback(current); }
+                    }
+                    Ok(LocalAudioCommand::Stop) => playback = None,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let following = playback.as_ref().and_then(|current| {
+                            if !current.sink.empty() || current.sink.get_pos() < Duration::from_millis(200) { return None; }
+                            let target = if current.repeat.as_str() == "one" { Some(current.index) }
+                                else if current.index + 1 < current.queue.len() { Some(current.index + 1) }
+                                else if current.repeat.as_str() == "all" { Some(0) } else { None };
+                            target.map(|target| (current.queue.clone(), target, current.app.clone(), current.shuffle, current.repeat))
+                        });
+                        if let Some((queue, target, app, shuffle, repeat)) = following {
+                            playback = create_local_playback(queue, target, app, f32::from_bits(worker_volume_bits.load(Ordering::SeqCst)), shuffle, repeat).ok();
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(current) = playback.as_mut() {
+                    if current.last_progress_emit.elapsed() >= Duration::from_secs(1) {
+                        emit_local_playback(current);
+                        current.last_progress_emit = Instant::now();
                     }
                 }
             }
         });
-        Self { sender, is_active: AtomicBool::new(false) }
+        Self { sender, is_active: AtomicBool::new(false), volume_bits }
+    }
+}
+
+fn shuffle_paths(paths: &mut [String]) {
+    let mut seed = Instant::now().elapsed().as_nanos() as u64 ^ paths.len() as u64;
+    for index in (1..paths.len()).rev() {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        paths.swap(index, (seed as usize) % (index + 1));
     }
 }
 
@@ -153,24 +240,133 @@ fn close_app(app: AppHandle) {
 }
 
 #[tauri::command]
-fn play_local_file(
+fn play_local_folder(
     app: AppHandle,
-    path: String,
+    paths: Vec<String>,
+    start_index: Option<usize>,
+    volume: Option<f64>,
     local_audio: State<'_, LocalAudioState>,
 ) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("Thư mục này không có file nhạc được hỗ trợ".to_string());
+    }
+    if let Some(volume) = volume {
+        let volume = (volume as f32).clamp(0.0, 1.0);
+        local_audio.volume_bits.store(volume.to_bits(), Ordering::SeqCst);
+    }
     local_audio.is_active.store(true, Ordering::SeqCst);
     local_audio
         .sender
-        .send(LocalAudioCommand::Play { path, app })
+        .send(LocalAudioCommand::PlayQueue { paths, start_index: start_index.unwrap_or(0), app })
         .map_err(|_| "Native audio thread is unavailable".to_string())
 }
 
+fn local_music_folder_config_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let folder = app.path().app_config_dir().ok()?;
+    std::fs::create_dir_all(&folder).ok()?;
+    Some(folder.join("local-music-folder.txt"))
+}
+
+fn saved_local_music_folder(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let path = local_music_folder_config_path(app)?;
+    let folder = std::path::PathBuf::from(std::fs::read_to_string(path).ok()?.trim());
+    folder.is_dir().then_some(folder)
+}
+
+fn default_local_music_folder() -> Option<std::path::PathBuf> {
+    let folder = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from)?.join("Music");
+    folder.is_dir().then_some(folder)
+}
+
 #[tauri::command]
-fn pick_local_music_file() -> Option<String> {
-    rfd::FileDialog::new()
-        .add_filter("Audio", &["mp3", "flac", "wav", "ogg", "m4a", "aac"])
-        .pick_file()
+fn get_local_music_library(app: AppHandle) -> Vec<LocalMusicFolder> {
+    let Some(root) = default_local_music_folder().or_else(|| saved_local_music_folder(&app)) else {
+        return Vec::new();
+    };
+
+    let mut folders: Vec<LocalMusicFolder> = std::fs::read_dir(&root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() { return None; }
+            let paths = collect_audio_files(&path);
+            (!paths.is_empty()).then(|| LocalMusicFolder {
+                name: entry.file_name().to_string_lossy().to_string(),
+                paths,
+            })
+        })
+        .collect();
+    folders.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+
+    let root_tracks: Vec<String> = std::fs::read_dir(&root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            path.is_file().then_some(path)
+        })
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac"))
+                .unwrap_or(false)
+        })
         .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    if !root_tracks.is_empty() {
+        folders.insert(0, LocalMusicFolder { name: "Nhạc chưa phân loại".to_string(), paths: root_tracks });
+    }
+    folders
+}
+
+#[tauri::command]
+fn load_saved_local_music_folder(app: AppHandle) -> Option<Vec<String>> {
+    let folder = saved_local_music_folder(&app)?;
+    let tracks = collect_audio_files(&folder);
+    (!tracks.is_empty()).then_some(tracks)
+}
+
+#[tauri::command]
+fn pick_local_music_folder(app: AppHandle) -> Option<Vec<String>> {
+    let initial_folder = saved_local_music_folder(&app).or_else(default_local_music_folder);
+    let dialog = if let Some(folder) = initial_folder {
+        rfd::FileDialog::new().set_directory(folder)
+    } else {
+        rfd::FileDialog::new()
+    };
+    let folder = dialog.pick_folder()?;
+    let tracks = collect_audio_files(&folder);
+    if tracks.is_empty() {
+        return None;
+    }
+    if let Some(config_path) = local_music_folder_config_path(&app) {
+        let _ = std::fs::write(config_path, folder.to_string_lossy().as_bytes());
+    }
+    Some(tracks)
+}
+
+fn collect_audio_files(folder: &std::path::Path) -> Vec<String> {
+    const EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "m4a", "aac"];
+    let mut files = Vec::new();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(current) = folders.pop() {
+        let entries = match std::fs::read_dir(current) { Ok(entries) => entries, Err(_) => continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| EXTENSIONS.iter().any(|known| ext.eq_ignore_ascii_case(known))) {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    files.sort_unstable();
+    files
 }
 
 #[tauri::command]
@@ -626,11 +822,31 @@ fn control_player(
                 .sender
                 .send(LocalAudioCommand::TogglePause)
                 .map_err(|_| "Native audio thread is unavailable".to_string())?,
-            "volume" => local_audio
+            "volume" => {
+                let volume = value.unwrap_or(1.0) as f32;
+                local_audio.volume_bits.store(volume.to_bits(), Ordering::SeqCst);
+                local_audio
+                    .sender
+                    .send(LocalAudioCommand::SetVolume(volume))
+                    .map_err(|_| "Native audio thread is unavailable".to_string())?
+            }
+            "next" => local_audio
                 .sender
-                .send(LocalAudioCommand::SetVolume(value.unwrap_or(1.0) as f32))
+                .send(LocalAudioCommand::Next)
                 .map_err(|_| "Native audio thread is unavailable".to_string())?,
-            "next" | "prev" | "seek" | "shuffle" | "loop" => {}
+            "prev" => local_audio
+                .sender
+                .send(LocalAudioCommand::Previous)
+                .map_err(|_| "Native audio thread is unavailable".to_string())?,
+            "shuffle" => local_audio
+                .sender
+                .send(LocalAudioCommand::ToggleShuffle)
+                .map_err(|_| "Native audio thread is unavailable".to_string())?,
+            "loop" => local_audio
+                .sender
+                .send(LocalAudioCommand::CycleRepeat)
+                .map_err(|_| "Native audio thread is unavailable".to_string())?,
+            "seek" => {}
             _ => return Err(format!("Unknown action: {}", action)),
         }
         return Ok(());
@@ -833,6 +1049,7 @@ fn toggle_expand_view(
     app: AppHandle,
     window: tauri::Window,
     is_expanded: bool,
+    show_player: Option<bool>,
     restore_state: State<'_, WindowRestoreState>,
 ) -> Result<(), String> {
     let main_win = window;
@@ -868,6 +1085,19 @@ fn toggle_expand_view(
         let webview = app
             .get_webview("yt-player")
             .ok_or_else(|| "Player webview not found".to_string())?;
+
+        if !show_player.unwrap_or(true) {
+            webview
+                .set_position(PhysicalPosition::new(
+                    (949.0 * scale_factor).round() as i32,
+                    (699.0 * scale_factor).round() as i32,
+                ))
+                .map_err(|e| format!("Failed to park player: {e}"))?;
+            webview
+                .set_size(PhysicalSize::new(1, 1))
+                .map_err(|e| format!("Failed to resize parked player: {e}"))?;
+            return Ok(());
+        }
 
         // Đặt webview chiếm khu vực bên dưới thanh điều khiển
         // logical x=10, y=130, width=930, height=560
@@ -972,6 +1202,27 @@ fn resize_yt_view(
 }
 
 #[tauri::command]
+fn park_player_webview(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    let webview = app
+        .get_webview("yt-player")
+        .ok_or_else(|| "Player webview not found".to_string())?;
+    let size = window
+        .inner_size()
+        .map_err(|error| format!("Failed to read window size: {error}"))?;
+
+    webview
+        .hide()
+        .map_err(|error| format!("Failed to hide player: {error}"))?;
+    webview
+        .set_position(PhysicalPosition::new(size.width as i32, size.height as i32))
+        .map_err(|error| format!("Failed to park player: {error}"))?;
+    webview
+        .set_size(PhysicalSize::new(1, 1))
+        .map_err(|error| format!("Failed to resize parked player: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn resize_modal(
     window: tauri::Window,
     is_open: bool,
@@ -1041,12 +1292,15 @@ pub fn run() {
             close_app,
             set_always_on_top,
             init_player_webview,
-            pick_local_music_file,
-            play_local_file,
+            get_local_music_library,
+            load_saved_local_music_folder,
+            pick_local_music_folder,
+            play_local_folder,
             control_player,
             switch_platform,
             toggle_expand_view,
             resize_yt_view,
+            park_player_webview,
             resize_modal
         ])
         .run(tauri::generate_context!())

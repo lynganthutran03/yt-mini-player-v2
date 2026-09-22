@@ -1,6 +1,6 @@
 # Mini Music Player
 
-Mini Music Player is an always-on-top desktop app that provides quick music controls for YouTube Music, YouTube, and SoundCloud.
+Mini Music Player is an always-on-top desktop app that provides quick music controls for YouTube Music, YouTube, SoundCloud, and local music files.
 
 Built with Tauri 2, React, TypeScript, and Vite, the app embeds the selected platform in a child webview. You continue to use your own account, library, and content on that service.
 
@@ -9,10 +9,15 @@ Built with Tauri 2, React, TypeScript, and Vite, the app embeds the selected pla
 - A borderless, transparent mini window that can be dragged, resized, and optionally kept always on top.
 - Displays artwork, track title, artist/album, playback state, and progress.
 - Play/pause, previous/next, seek, volume, and mute controls.
-- Quickly switch between YouTube Music, YouTube, and SoundCloud.
+- Quickly switch between YouTube Music, YouTube, SoundCloud, and Local Music.
 - Expand the window to interact directly with the platform's webpage.
 - Four visual themes, an accent-color picker, and an optional spinning-vinyl effect. Accent color and vinyl preferences are stored locally.
+- Vietnamese and English application UI, selectable from Settings. The chosen language is stored locally; translations are bundled with the app and are never fetched from the network.
 - Snaps the window to screen edges when dragged nearby.
+- Local Music library that scans folders inside the Windows `Music` directory and supports MP3, FLAC, WAV, OGG, M4A, and AAC files.
+- File Explorer-style Local Music browser: browse folders before playing, play a selected track, double-click a folder to play it, or use **Play folder**.
+- An **All music** view with each track's source folder, library refresh, shuffle/repeat, previous/next, and a persistent Local Music volume.
+- Optional automatic continuation into subsequent music folders after a folder finishes.
 
 ## Prerequisites
 
@@ -63,6 +68,15 @@ Tauri writes the built application and installers to `src-tauri/target/release/b
 2. Select the expand button to reveal the platform's webpage, then sign in if needed.
 3. Start playback as usual. The mini player synchronizes track information and the basic controls.
 4. Use the three-dot menu to switch themes, change the accent color, or enable/disable the vinyl effect.
+
+### Local Music
+
+1. Select **Local Music**. The app expands to show folders in your Windows `Music` directory.
+2. Click a folder to browse its tracks. Clicking a track plays it; double-clicking a folder or selecting **Play folder** starts from its first track.
+3. Choose **All music** to browse every scanned track. This view includes the folder containing each track.
+4. Use the refresh button after adding, removing, or reorganizing files. Enable **Play next folder automatically** if playback should continue beyond the selected folder.
+
+Local Music is played natively by the app. It does not load a web page, and it keeps a separate volume preference.
 
 On regular YouTube, shuffle and repeat are available only when the current content belongs to a playlist or queue. Control support also depends on each platform's webpage structure and may change when the service updates its UI.
 
