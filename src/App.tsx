@@ -595,7 +595,10 @@ export const App: React.FC = () => {
     }
   };
 
-  // Bấm giữ kéo di chuyển cửa sổ (native dragging)
+  // Let Windows own the drag operation.  Moving the window manually with
+  // setPosition on every pointer frame creates a stream of IPC calls; when
+  // the embedded media WebView is busy, those calls back up and the title bar
+  // feels much slower than the audio playback.
   const handleStartDragging = async (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
@@ -604,40 +607,7 @@ export const App: React.FC = () => {
     }
     e.preventDefault();
     try {
-      const win = getCurrentWindow();
-      const dragTarget = e.currentTarget;
-      dragTarget.setPointerCapture(e.pointerId);
-      const [startPosition, scaleFactor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
-      const startX = e.screenX;
-      const startY = e.screenY;
-      let pending = false;
-
-      const onPointerMove = (moveEvent: PointerEvent) => {
-        if ((moveEvent.buttons & 1) === 0 || pending) return;
-        pending = true;
-        requestAnimationFrame(() => {
-          const x = Math.round(startPosition.x + (moveEvent.screenX - startX) * scaleFactor);
-          const y = Math.round(startPosition.y + (moveEvent.screenY - startY) * scaleFactor);
-          win.setPosition(new PhysicalPosition(x, y)).catch((err) => console.warn('drag move error:', err)).finally(() => {
-            pending = false;
-          });
-        });
-      };
-      const onPointerUp = (upEvent: PointerEvent) => {
-        dragTarget.removeEventListener('pointermove', onPointerMove);
-        dragTarget.removeEventListener('pointerup', onPointerUp);
-        dragTarget.removeEventListener('pointercancel', onPointerUp);
-        if (dragTarget.hasPointerCapture(e.pointerId)) dragTarget.releasePointerCapture(e.pointerId);
-        window.dispatchEvent(new CustomEvent('mini-player-drag-end', {
-          detail: new PhysicalPosition(
-            Math.round(startPosition.x + (upEvent.screenX - startX) * scaleFactor),
-            Math.round(startPosition.y + (upEvent.screenY - startY) * scaleFactor),
-          ),
-        }));
-      };
-      dragTarget.addEventListener('pointermove', onPointerMove);
-      dragTarget.addEventListener('pointerup', onPointerUp, { once: true });
-      dragTarget.addEventListener('pointercancel', onPointerUp, { once: true });
+      await getCurrentWindow().startDragging();
     } catch (err) {
       console.warn('startDragging error:', err);
     }
