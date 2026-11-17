@@ -4,6 +4,8 @@ import { LogicalPosition, LogicalSize, PhysicalPosition } from '@tauri-apps/api/
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
+import { MarqueeText } from './components/MarqueeText';
+import { BatteryBadges, BatteryStatus } from './components/BatteryBadges';
 
 interface YTMusicData {
   title: string;
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(100);
+  const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const [platform, setPlatform] = useState('youtube-music');
   const [playerLoadState, setPlayerLoadState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [localTracks, setLocalTracks] = useState<string[]>([]);
@@ -98,6 +101,13 @@ export const App: React.FC = () => {
   useEffect(() => {
     platformRef.current = platform;
   }, [platform]);
+
+  // Pin tai nghe/chuột không dây: backend Rust poll mỗi phút và chỉ emit khi thay đổi.
+  useEffect(() => {
+    invoke<BatteryStatus | null>('get_device_battery').then((s) => { if (s) setBattery(s); }).catch(() => {});
+    const unlisten = listen<BatteryStatus>('device-battery', (e) => setBattery(e.payload));
+    return () => { unlisten.then((u) => u()); };
+  }, []);
 
   // Khởi tạo child webview YouTube Music và lắng nghe sự kiện scraper
   useEffect(() => {
@@ -641,13 +651,16 @@ export const App: React.FC = () => {
 
           <div className="song-info">
             <div id="title" className="title player-title" title={title || platformLabel}>
-              <span>{title || platformLabel}</span>
+              <MarqueeText text={title || platformLabel} />
             </div>
             <div className="artist">
               <span id="artist">{playerLoadState === 'failed' ? t('player.failed') : artist}</span>
               <span id="album">{album}</span>
             </div>
           </div>
+
+
+          {battery && <BatteryBadges status={battery} placement="top" />}
 
             <button id="close-app" title={t('player.close')}>
             <i className="fa-solid fa-xmark"></i>
@@ -656,6 +669,7 @@ export const App: React.FC = () => {
 
         {/* Hàng 2: Thanh tua nhạc */}
         <div className="progress-container">
+          {battery && <BatteryBadges status={battery} placement="progress" />}
           <span id="current-time">{formatTime(currentTime)}</span>
           <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center' }}>
             <input

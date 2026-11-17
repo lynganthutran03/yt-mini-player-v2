@@ -1,3 +1,5 @@
+mod battery;
+
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Sender},
@@ -863,13 +865,14 @@ fn init_player_webview_inner(app: AppHandle, main_win: tauri::Window) -> Result<
     });
 
     // Park child webview at 1x1 bottom corner initially (same trick as V1)
-    main_win
+    let player = main_win
         .add_child(
             webview,
             PhysicalPosition::new(419, 129),
             PhysicalSize::new(1, 1),
         )
         .map_err(|e| format!("Failed to embed YouTube Music webview: {:?}", e))?;
+    set_player_memory_low(&player, true);
 
     Ok(())
 }
@@ -1160,6 +1163,7 @@ fn toggle_expand_view(
                 webview
                     .set_size(PhysicalSize::new(1, 1))
                     .map_err(|e| format!("Failed to resize parked player: {e}"))?;
+                set_player_memory_low(&webview, true);
             }
             return Ok(());
         }
@@ -1191,6 +1195,7 @@ fn toggle_expand_view(
         webview
             .set_focus()
             .map_err(|e| format!("Failed to focus player: {e}"))?;
+        set_player_memory_low(&webview, false);
         let _ = webview.eval("if (window.__setExpandedMode) window.__setExpandedMode(true);");
     } else {
         // Thu nhỏ cửa sổ chính về 420x130 Logical
@@ -1236,6 +1241,7 @@ fn toggle_expand_view(
         webview
             .set_size(phys_size)
             .map_err(|e| format!("Failed to resize parked player: {e}"))?;
+        set_player_memory_low(&webview, true);
     }
 
     Ok(())
@@ -1288,6 +1294,7 @@ fn park_player_webview(app: AppHandle, window: tauri::Window) -> Result<(), Stri
     webview
         .set_size(PhysicalSize::new(1, 1))
         .map_err(|error| format!("Failed to resize parked player: {error}"))?;
+    set_player_memory_low(&webview, true);
     Ok(())
 }
 
@@ -1357,6 +1364,10 @@ pub fn run() {
         .manage(WindowRestoreState::default())
         .manage(PlayerNavigationState::default())
         .manage(LocalAudioState::new())
+        .setup(|app| {
+            battery::start(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             close_app,
             set_always_on_top,
@@ -1370,8 +1381,35 @@ pub fn run() {
             toggle_expand_view,
             resize_yt_view,
             park_player_webview,
-            resize_modal
+            resize_modal,
+            battery::get_device_battery
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Ask WebView2 to trim memory while the player page is parked/hidden
+/// (`MemoryUsageTargetLevel::Low`), and restore normal when it is shown again.
+/// Audio keeps playing; WebView2 only drops caches and pages out idle memory.
+fn set_player_memory_low(webview: &tauri::Webview, low: bool) {
+    #[cfg(windows)]
+    {
+        let _ = webview.with_webview(move |wv| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+            };
+            use windows_core::Interface;
+            let Ok(core) = wv.controller().CoreWebView2() else { return };
+            let Ok(core19) = core.cast::<ICoreWebView2_19>() else { return };
+            let level = if low {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+            } else {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+            };
+            let _ = core19.SetMemoryUsageTargetLevel(level);
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = (webview, low);
 }
